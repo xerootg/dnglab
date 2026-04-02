@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use image::DynamicImage;
 
 use crate::CFA;
@@ -8,6 +10,7 @@ use crate::Result;
 use crate::analyze::FormatDump;
 use crate::decompressors::packed::decompress_12le_unpacked_left_aligned;
 use crate::decompressors::packed::decompress_12le_wcontrol;
+use crate::dng::opcodes;
 use crate::exif::Exif;
 use crate::formats::tiff::Entry;
 use crate::formats::tiff::GenericTiffReader;
@@ -24,6 +27,7 @@ use crate::pixarray::PixU16;
 use crate::rawimage::CFAConfig;
 use crate::rawimage::RawPhotometricInterpretation;
 use crate::rawsource::RawSource;
+use crate::tags::DngTag;
 use crate::tags::ExifTag;
 use crate::tags::TiffCommonTag;
 use crate::tags::tiff_tag_enum;
@@ -40,12 +44,27 @@ use super::Decoder;
 use super::FormatHint;
 use super::RawDecodeParams;
 use super::RawMetadata;
+use super::WellKnownIFD;
 
 pub(crate) mod v4decompressor;
 pub(crate) mod v5decompressor;
 pub(crate) mod v6decompressor;
 pub(crate) mod v7decompressor;
 pub(crate) mod v8decompressor;
+
+/// Parsed radial distortion parameters from the Panasonic DistortionInfo blob.
+///
+/// The camera embeds these in the PanasonicRaw IFD (tag 0x0119).
+/// The correction formula is: `Ru = scale * (Rd + a·Rd³ + b·Rd⁵ + c·Rd⁷)`
+/// where `Rd` / `Ru` are pixel radii normalised to `n` (DistortionN).
+#[derive(Debug, Clone)]
+struct PanasonicDistortionParams {
+  a: f64,     // DistortionParam02 / 32768 — cubic radial coefficient
+  b: f64,     // DistortionParam04 / 32768 — quintic radial coefficient
+  c: f64,     // DistortionParam08 / 32768 — septic radial coefficient
+  scale: f64, // 1 / (1 + raw_scale/32768) — overall scale
+  n: f64,     // DistortionN — reference radius in pixels
+}
 
 #[derive(Debug, Clone)]
 pub struct Rw2Decoder<'a> {
@@ -54,6 +73,7 @@ pub struct Rw2Decoder<'a> {
   tiff: GenericTiffReader,
   camera_ifd: Option<IFD>,
   camera: Camera,
+  dist_params: Option<PanasonicDistortionParams>,
 }
 
 impl<'a> Rw2Decoder<'a> {
@@ -96,11 +116,22 @@ impl<'a> Rw2Decoder<'a> {
       None
     };
 
+    let dist_params = tiff
+      .get_entry(PanasonicTag::DistortionInfo)
+      .and_then(|e| {
+        if let Value::Undefined(data) = &e.value {
+          parse_panasonic_distortion(data)
+        } else {
+          None
+        }
+      });
+
     Ok(Rw2Decoder {
       rawloader,
       tiff,
       camera_ifd,
       camera,
+      dist_params,
     })
   }
 }
@@ -226,6 +257,64 @@ impl<'a> Decoder for Rw2Decoder<'a> {
 
   fn format_hint(&self) -> FormatHint {
     FormatHint::RW2
+  }
+
+  fn ifd(&self, wk_ifd: WellKnownIFD) -> crate::Result<Option<Rc<IFD>>> {
+    if !matches!(wk_ifd, WellKnownIFD::VirtualDngRawTags) {
+      return Ok(None);
+    }
+    let Some(ref dp) = self.dist_params else {
+      return Ok(None);
+    };
+
+    // Full sensor dimensions are needed to convert from Panasonic's DistortionN
+    // normalisation to DNG's half-diagonal normalisation.
+    let w = self.tiff.get_entry(PanasonicTag::PanaWidth).map(|e| e.force_usize(0)).unwrap_or(0);
+    let h = self.tiff.get_entry(PanasonicTag::PanaLength).map(|e| e.force_usize(0)).unwrap_or(0);
+    if w == 0 || h == 0 {
+      return Ok(None);
+    }
+    // m = half-diagonal of the full sensor image in pixels
+    let m = ((w * w + h * h) as f64).sqrt() / 2.0;
+    let ratio = m / dp.n;
+    let ratio2 = ratio * ratio;
+
+    // Convert Panasonic polynomial to DNG WarpRectilinear coefficients.
+    //
+    // Panasonic: Ru = scale * (Rd + a·Rd³ + b·Rd⁵ + c·Rd⁷)    (r normalised to N)
+    // DNG:       Ru = (kr0·Rd + kr1·Rd³ + kr2·Rd⁵ + kr3·Rd⁷)   (r normalised to m)
+    //
+    // Substituting Rd_pan = Rd_dng · (m/N) and solving:
+    //   kr0 = scale
+    //   kr1 = scale · a · (m/N)²
+    //   kr2 = scale · b · (m/N)⁴
+    //   kr3 = scale · c · (m/N)⁶
+    let kr0 = dp.scale;
+    let kr1 = dp.scale * dp.a * ratio2;
+    let kr2 = dp.scale * dp.b * ratio2 * ratio2;
+    let kr3 = dp.scale * dp.c * ratio2 * ratio2 * ratio2;
+
+    log::debug!(
+      "RW2 WarpRectilinear: kr0={:.6} kr1={:.6} kr2={:.6} kr3={:.6} (m={:.1} N={:.1})",
+      kr0,
+      kr1,
+      kr2,
+      kr3,
+      m,
+      dp.n
+    );
+
+    let kr = [[kr0, kr1, kr2, kr3]];
+    let kt = [[0.0_f64, 0.0_f64]];
+    let opcode = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+    let opcode_list2 = opcodes::encode_opcode_list(&[opcode]);
+
+    let mut ifd = IFD::default();
+    ifd.entries.insert(
+      DngTag::OpcodeList2.into(),
+      Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(opcode_list2), embedded: None },
+    );
+    Ok(Some(Rc::new(ifd)))
   }
 }
 
@@ -434,8 +523,12 @@ pub enum PanasonicTag {
   CF2StripHeights = 0x0048,
   CF2StripWidth = 0x0064,
 
+  NoiseReductionParams = 0x001b,
+  WBInfo2 = 0x0027,
+
   CameraIFD = 0x0120,
   Multishot = 0x0121,
+  DistortionInfo = 0x0119,
 }
 
 /// Common tags, generally used in root IFD or SubIFDs
@@ -444,4 +537,81 @@ pub enum PanasonicTag {
 pub enum CameraIfdTag {
   LensTypeMake = 0x1201,
   LensTypeModel = 0x1202,
+}
+
+/// Read a little-endian i16 from a byte slice at the given byte offset.
+#[inline]
+fn read_le_i16(data: &[u8], offset: usize) -> i16 {
+  i16::from_le_bytes([data[offset], data[offset + 1]])
+}
+
+/// Parse the 32-byte Panasonic DistortionInfo blob (tag 0x0119).
+///
+/// Layout (little-endian int16s, indices are byte offsets):
+/// ```text
+///  0-1   Checksum A
+///  1-4   Magic "THPF" (ASCII)
+///  4-5   DistortionParam02 — cubic radial coefficient  (int16s / 32768)
+///  6-7   (unused)
+///  8-9   DistortionParam04 — quintic radial coefficient (int16s / 32768)
+/// 10-11  DistortionScale   — scale factor raw           (int16s)
+/// 12-13  (unused)
+/// 14-15  DistortionCorrection flag  (low nibble: 0=off/no-lens 1=on)
+/// 16-17  DistortionParam08 — septic radial coefficient  (int16s / 32768)
+/// 18-19  DistortionParam09 — (tangential, unused here)
+/// 20-21  (unused)
+/// 22-23  DistortionParam11 — (higher order, unused here)
+/// 24-25  DistortionN       — reference radius in pixels (int16s)
+/// 26-27  (unused)
+/// 28-29  Checksum B
+/// 30-31  Checksum C
+/// ```
+///
+/// Returns `None` if the blob is malformed, too short, or correction is disabled.
+fn parse_panasonic_distortion(data: &[u8]) -> Option<PanasonicDistortionParams> {
+  if data.len() < 32 {
+    return None;
+  }
+  // Verify the "THPF" marker at bytes 1-4
+  if &data[1..5] != b"THPF" {
+    log::debug!("RW2 DistortionInfo: missing THPF magic, skipping");
+    return None;
+  }
+  // DistortionCorrection flag: low nibble of the int16s at byte offset 14.
+  // 0 = correction off / no lens, 1 = on.
+  let correction_flag = read_le_i16(data, 14) & 0x0f;
+  if correction_flag == 0 {
+    log::debug!("RW2 DistortionInfo: correction disabled (flag=0), skipping");
+    return None;
+  }
+
+  let raw_a = read_le_i16(data, 4) as f64;   // DistortionParam02
+  let raw_b = read_le_i16(data, 8) as f64;   // DistortionParam04
+  let raw_s = read_le_i16(data, 10) as f64;  // DistortionScale
+  let raw_c = read_le_i16(data, 16) as f64;  // DistortionParam08
+  let raw_n = read_le_i16(data, 24) as f64;  // DistortionN
+
+  if raw_n <= 0.0 {
+    log::debug!("RW2 DistortionInfo: DistortionN <= 0, skipping");
+    return None;
+  }
+
+  let params = PanasonicDistortionParams {
+    a: raw_a / 32768.0,
+    b: raw_b / 32768.0,
+    c: raw_c / 32768.0,
+    scale: 1.0 / (1.0 + raw_s / 32768.0),
+    n: raw_n,
+  };
+
+  log::debug!(
+    "RW2 DistortionInfo: a={:.6} b={:.6} c={:.6} scale={:.6} N={:.0}",
+    params.a,
+    params.b,
+    params.c,
+    params.scale,
+    params.n
+  );
+
+  Some(params)
 }
