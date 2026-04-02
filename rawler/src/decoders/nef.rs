@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use image::DynamicImage;
 use log::debug;
 use log::warn;
@@ -24,6 +26,8 @@ use crate::decompressors::decompress_lines_fn;
 use crate::decompressors::ljpeg::huffman::HuffTable;
 use crate::decompressors::packed::*;
 use crate::exif::Exif;
+use crate::dng::opcodes;
+use crate::formats::tiff::entry::Entry;
 use crate::formats::tiff::GenericTiffReader;
 use crate::formats::tiff::IFD;
 use crate::formats::tiff::Value;
@@ -42,6 +46,7 @@ use crate::rawimage::CFAConfig;
 use crate::rawimage::RawPhotometricInterpretation;
 use crate::rawimage::WhiteLevel;
 use crate::rawsource::RawSource;
+use crate::tags::DngTag;
 use crate::tags::ExifTag;
 use crate::tags::TiffCommonTag;
 
@@ -51,6 +56,7 @@ use super::Decoder;
 use super::FormatHint;
 use super::RawDecodeParams;
 use super::RawMetadata;
+use super::WellKnownIFD;
 
 mod decrypt;
 pub mod lensdata;
@@ -141,6 +147,11 @@ pub struct NefDecoder<'a> {
   tiff: GenericTiffReader,
   makernote: IFD,
   camera: Camera,
+  /// Pre-computed OpcodeList1 blob (vignette correction, applied before demosaicing).
+  /// Empty when no NikonNEFInfo lens correction data is found.
+  opcode_list1: Vec<u8>,
+  /// Pre-computed OpcodeList2 blob (distortion correction, applied after demosaicing).
+  opcode_list2: Vec<u8>,
 }
 
 impl<'a> NefDecoder<'a> {
@@ -165,11 +176,30 @@ impl<'a> NefDecoder<'a> {
 
     //makernote.dump::<ExifTag>(0).iter().for_each(|line| eprintln!("DUMP: {}", line));
 
+    // Parse NikonNEFInfo tag 0xc7d5 from the raw IFD for lens correction opcodes.
+    let (opcode_list1, opcode_list2) = {
+      let raw2 = tiff
+        .find_first_ifd_with_tag(TiffCommonTag::CFAPattern)
+        .or_else(|| tiff.find_ifd_with_new_subfile_type(0));
+      raw2
+        .and_then(|r| r.get_entry(0xc7d5_u16))
+        .and_then(|entry| {
+          if let Value::Undefined(data) = &entry.value {
+            parse_nikon_nef_opcodes(data)
+          } else {
+            None
+          }
+        })
+        .unwrap_or_default()
+    };
+
     Ok(NefDecoder {
       tiff,
       rawloader,
       makernote,
       camera,
+      opcode_list1,
+      opcode_list2,
     })
   }
 }
@@ -357,6 +387,42 @@ impl<'a> Decoder for NefDecoder<'a> {
 
   fn format_hint(&self) -> FormatHint {
     FormatHint::NEF
+  }
+
+  fn ifd(&self, wk_ifd: WellKnownIFD) -> crate::Result<Option<Rc<IFD>>> {
+    match wk_ifd {
+      WellKnownIFD::VirtualDngRootTags => {
+        let mut ifd = IFD::default();
+        // MakerNoteSafety = 1 tells the DNG converter that the Nikon MakerNote
+        // (including encrypted ShotInfo, NefMeta, ContrastCurve, LensData, etc.)
+        // has absolute offsets and is safe to preserve verbatim in the output DNG.
+        ifd.entries.insert(
+          DngTag::MakerNoteSafety.into(),
+          Entry { tag: DngTag::MakerNoteSafety.into(), value: Value::Short(vec![1]), embedded: None },
+        );
+        Ok(Some(Rc::new(ifd)))
+      }
+      WellKnownIFD::VirtualDngRawTags => {
+        if self.opcode_list1.is_empty() && self.opcode_list2.is_empty() {
+          return Ok(None);
+        }
+        let mut ifd = IFD::default();
+        if !self.opcode_list1.is_empty() {
+          ifd.entries.insert(
+            DngTag::OpcodeList1.into(),
+            Entry { tag: DngTag::OpcodeList1.into(), value: Value::Undefined(self.opcode_list1.clone()), embedded: None },
+          );
+        }
+        if !self.opcode_list2.is_empty() {
+          ifd.entries.insert(
+            DngTag::OpcodeList2.into(),
+            Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(self.opcode_list2.clone()), embedded: None },
+          );
+        }
+        Ok(Some(Rc::new(ifd)))
+      }
+      _ => Ok(None),
+    }
   }
 }
 
@@ -744,6 +810,167 @@ impl<'a> NefDecoder<'a> {
       }),
     )
   }
+}
+
+/// Parse the NikonNEFInfo blob (tag 0xc7d5 in the raw SubIFD of Z-series NEF files)
+/// and build OpcodeList1 (vignette) and OpcodeList2 (distortion) blobs.
+///
+/// NikonNEFInfo layout:
+///   bytes  0- 5:  "Nikon\0"
+///   bytes  6- 7:  version (e.g. 0x01 0x03)
+///   bytes  8- 9:  0x00 0x00
+///   bytes 10-11:  endian marker "II" (LE) or "MM" (BE)
+///   bytes 12-13:  TIFF magic (42 LE)
+///   bytes 14-17:  IFD offset from "II" marker (always 8 → IFD at byte 18)
+///   bytes 18+  :  standard TIFF IFD
+///     entry 0x0005 → DistortionInfo (UNDEFINED, 84 bytes)
+///     entry 0x0006 → VignetteInfo   (UNDEFINED, 116 bytes)
+///
+/// DistortionInfo layout (LE):
+///   0x00-0x03: version string "0100"
+///   0x04:      DistortionCorrection flag (1 = on optional, 3 = on required)
+///   0x10:      u32 number of coefficients (typically 4; last is often 0)
+///   0x14 + 8×i: i32 numerator, i32 denominator  (rational64s, denom = 1048576)
+///
+/// VignetteInfo layout (LE):
+///   0x00-0x03: version string "0100"
+///   0x10:      u32 polynomial degree (always 8 → 4 coefficients for r²,r⁴,r⁶,r⁸)
+///   0x24 + 16×j: i32 numerator, i32 denominator  (rational64s, denom = 1048576)
+///     (j=0 → k0, j=1 → k1, j=2 → k2, optional j=3 → k3 usually 0)
+///
+/// Coefficient interpretation (see DNG 1.3 spec, opcodes 1 and 3):
+///   FixVignetteRadial: pixel *= 1 + k0·r² + k1·r⁴ + k2·r⁶ (positive = brighten)
+///   WarpRectilinear:   x' = cx + m·(kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶)·dx
+///     where kr0=1.0 means no overall scaling; Nikon d1,d2,d3 → kr1,kr2,kr3.
+///
+/// NOTE: Nikon's exact polynomial model is not publicly documented.  The
+/// coefficient mapping here is a best-effort approximation based on reverse-
+/// engineering by the ExifTool community (ref [28]) and matches ACR's
+/// behaviour (which reads the DistortionCorrection flag but applies its own
+/// built-in profile rather than these raw coefficients).
+fn parse_nikon_nef_opcodes(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+  // Verify the "Nikon\0" magic
+  if data.len() < 20 || &data[0..6] != b"Nikon\0" {
+    return None;
+  }
+  // Only handle little-endian sub-IFD for now
+  if &data[10..12] != b"II" {
+    debug!("parse_nikon_nef_opcodes: big-endian NikonNEFInfo not supported");
+    return None;
+  }
+  // IFD offset is relative to the "II" marker at data[10]
+  let ifd_offset = u32::from_le_bytes(data[14..18].try_into().ok()?) as usize;
+  let ii_base = 10usize;
+  let ifd_start = ii_base + ifd_offset; // = 18
+
+  if ifd_start + 2 > data.len() {
+    return None;
+  }
+  let num_entries = u16::from_le_bytes(data[ifd_start..ifd_start + 2].try_into().ok()?) as usize;
+
+  let mut dist_blob: Option<&[u8]> = None;
+  let mut vig_blob: Option<&[u8]> = None;
+
+  for i in 0..num_entries {
+    let e = ifd_start + 2 + i * 12;
+    if e + 12 > data.len() {
+      break;
+    }
+    let tag = u16::from_le_bytes(data[e..e + 2].try_into().ok()?);
+    let typ = u16::from_le_bytes(data[e + 2..e + 4].try_into().ok()?);
+    let count = u32::from_le_bytes(data[e + 4..e + 8].try_into().ok()?) as usize;
+    let raw_offset = u32::from_le_bytes(data[e + 8..e + 12].try_into().ok()?) as usize;
+
+    if typ == 7 && count > 4 {
+      // UNDEFINED with external offset (relative to "II" marker at data[10])
+      let blob_start = ii_base + raw_offset;
+      let blob_end = blob_start + count;
+      if blob_end <= data.len() {
+        match tag {
+          5 => dist_blob = Some(&data[blob_start..blob_end]),
+          6 => vig_blob = Some(&data[blob_start..blob_end]),
+          _ => {}
+        }
+      }
+    }
+  }
+
+  let opcode_list2 = dist_blob.and_then(build_warp_rectilinear_opcode).unwrap_or_default();
+  let opcode_list1 = vig_blob.and_then(build_fix_vignette_opcode).unwrap_or_default();
+
+  if opcode_list1.is_empty() && opcode_list2.is_empty() {
+    return None;
+  }
+  Some((opcode_list1, opcode_list2))
+}
+
+/// Read a `rational64s` (pair of i32 LE) from a blob at byte offset `off`.
+/// Returns `None` if denominator is zero or data is too short.
+fn read_rational64s(blob: &[u8], off: usize) -> Option<f64> {
+  if off + 8 > blob.len() {
+    return None;
+  }
+  let num = i32::from_le_bytes(blob[off..off + 4].try_into().ok()?) as f64;
+  let den = i32::from_le_bytes(blob[off + 4..off + 8].try_into().ok()?) as f64;
+  if den == 0.0 {
+    None
+  } else {
+    Some(num / den)
+  }
+}
+
+/// Build a WarpRectilinear OpcodeList blob from a DistortionInfo blob.
+///
+/// The correction flag at offset 0x04 must be 1 or 3 (on); if it is 0 or 2
+/// (no lens / off) the function returns `None` so no opcode is written.
+fn build_warp_rectilinear_opcode(blob: &[u8]) -> Option<Vec<u8>> {
+  if blob.len() < 0x2C {
+    return None;
+  }
+  // DistortionCorrection flag: 0=no lens, 1=on optional, 2=off, 3=on required
+  let dc_flag = blob[0x04];
+  if dc_flag == 0 || dc_flag == 2 {
+    debug!("NEF DistortionInfo: correction is off (flag={}), skipping WarpRectilinear opcode", dc_flag);
+    return None;
+  }
+
+  // Three radial correction coefficients at rational64s offsets 0x14, 0x1C, 0x24
+  let d1 = read_rational64s(blob, 0x14).unwrap_or(0.0);
+  let d2 = read_rational64s(blob, 0x1C).unwrap_or(0.0);
+  let d3 = read_rational64s(blob, 0x24).unwrap_or(0.0);
+
+  // DNG WarpRectilinear: x' = cx + m·(kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶)·dx
+  // kr0 = 1.0 (identity scale), Nikon coefficients map to kr1..kr3.
+  let kr = [[1.0_f64, d1, d2, d3]];
+  let kt = [[0.0_f64, 0.0_f64]];
+
+  log::debug!("NEF WarpRectilinear: kr1={:.5} kr2={:.5} kr3={:.5}", d1, d2, d3);
+
+  let opcode = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+  Some(opcodes::encode_opcode_list(&[opcode]))
+}
+
+/// Build a FixVignetteRadial OpcodeList blob from a VignetteInfo blob.
+fn build_fix_vignette_opcode(blob: &[u8]) -> Option<Vec<u8>> {
+  if blob.len() < 0x4C {
+    return None;
+  }
+
+  // Three (or four) vignette coefficients.
+  // Offsets 0x24, 0x34, 0x44 are standard rational64s slots (ExifTool ref [28]).
+  // The optional 4th coefficient is at 0x4C with an alternative denominator of 1
+  // (not 1048576 like the others): bytes 0x4C-0x4F = numerator, 0x50-0x53 = denominator.
+  // ExifTool notes it "seems to always be 0".
+  let k0 = read_rational64s(blob, 0x24).unwrap_or(0.0);
+  let k1 = read_rational64s(blob, 0x34).unwrap_or(0.0);
+  let k2 = read_rational64s(blob, 0x44).unwrap_or(0.0);
+  // 4th coefficient: denominator is 1 (not 1048576), so typically = 0/1 = 0
+  let k3 = if blob.len() >= 0x54 { read_rational64s(blob, 0x4C).unwrap_or(0.0) } else { 0.0 };
+
+  log::debug!("NEF FixVignetteRadial: k0={:.5} k1={:.5} k2={:.5} k3={:.5}", k0, k1, k2, k3);
+
+  let opcode = opcodes::encode_fix_vignette_radial(k0, k1, k2, k3, 0.0, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+  Some(opcodes::encode_opcode_list(&[opcode]))
 }
 
 fn normalize_wb(raw_wb: [f32; 4]) -> [f32; 4] {

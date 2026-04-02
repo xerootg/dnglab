@@ -2,6 +2,7 @@
 // Copyright 2023 Daniel Vogelbacher <daniel@chaospixel.com>
 
 pub mod convert;
+pub mod opcodes;
 pub mod original;
 pub mod writer;
 

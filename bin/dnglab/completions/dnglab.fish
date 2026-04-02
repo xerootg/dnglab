@@ -95,6 +95,7 @@ complete -c dnglab -n "__fish_dnglab_using_subcommand convert" -l image-index -d
 complete -c dnglab -n "__fish_dnglab_using_subcommand convert" -l crop -d 'DNG default crop' -r -f -a "best\t''
 activearea\t''
 none\t''"
+complete -c dnglab -n "__fish_dnglab_using_subcommand convert" -l dcp-dir -d 'Path to a directory containing DNG Camera Profile (.dcp) files' -r -F
 complete -c dnglab -n "__fish_dnglab_using_subcommand convert" -s d -l loglevel -d 'Log level' -r -f -a "error\t''
 warn\t''
 info\t''
@@ -120,6 +121,7 @@ complete -c dnglab -n "__fish_dnglab_using_subcommand ftpserver" -l image-index 
 complete -c dnglab -n "__fish_dnglab_using_subcommand ftpserver" -l crop -d 'DNG default crop' -r -f -a "best\t''
 activearea\t''
 none\t''"
+complete -c dnglab -n "__fish_dnglab_using_subcommand ftpserver" -l dcp-dir -d 'Path to a directory containing DNG Camera Profile (.dcp) files' -r -F
 complete -c dnglab -n "__fish_dnglab_using_subcommand ftpserver" -l port -d 'FTP listen port' -r
 complete -c dnglab -n "__fish_dnglab_using_subcommand ftpserver" -l listen -d 'FTP listen address' -r
 complete -c dnglab -n "__fish_dnglab_using_subcommand ftpserver" -l keep-original -d 'Keep original raw' -r -f -a "true\t''

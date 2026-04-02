@@ -1,7 +1,7 @@
 use std::{
   ffi::OsStr,
   io::{Cursor, Seek, Write},
-  path::Path,
+  path::{Path, PathBuf},
   sync::Arc,
   thread::JoinHandle,
 };
@@ -10,9 +10,10 @@ use image::DynamicImage;
 
 use crate::{
   RawImage, RawImageData,
+  dcp::{DcpProfile, find_dcp},
   decoders::{Decoder, RawDecodeParams, RawPhotometricInterpretation, WellKnownIFD, WhiteLevel},
   dng::{DNG_VERSION_V1_4, PREVIEW_JPEG_QUALITY, original::OriginalCompressed, writer::DngWriter},
-  formats::tiff::Entry,
+
   imgop::{
     develop::RawDevelop,
     fuji_rotate::fuji_normalize_rotation,
@@ -40,6 +41,10 @@ pub struct ConvertParams {
   pub software: String,
   pub index: usize,
   pub keep_mtime: bool,
+  /// Optional path to a directory containing DCP (DNG Camera Profile) files.
+  /// When set, the converter looks for `<dcp_dir>/<UniqueCameraModel>.dcp`
+  /// and injects ForwardMatrix, HueSatMap, ToneCurve, and related tags.
+  pub dcp_dir: Option<PathBuf>,
 }
 
 impl Default for ConvertParams {
@@ -57,6 +62,7 @@ impl Default for ConvertParams {
       software: "DNGLab".into(),
       index: 0,
       keep_mtime: false,
+      dcp_dir: None,
     }
   }
 }
@@ -178,6 +184,21 @@ where
   // Write metadata
   dng.load_base_tags(&rawimage)?;
   dng.load_metadata(&metadata)?;
+
+  // Apply DCP color profile if a profiles directory was provided
+  if let Some(dcp_dir) = &params.dcp_dir {
+    let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
+    match find_dcp(dcp_dir, &unique_model) {
+      Some(dcp_path) => match DcpProfile::load(&dcp_path) {
+        Ok(profile) => {
+          dng.root_ifd_mut().copy(profile.copy_tags_iter());
+          log::debug!("Applied DCP profile from: {}", dcp_path.display());
+        }
+        Err(err) => log::warn!("Failed to load DCP profile '{}': {:?}", dcp_path.display(), err),
+      },
+      None => log::debug!("No DCP profile found for '{}' in '{}'", unique_model, dcp_dir.display()),
+    }
+  }
   if !dng.root_ifd().contains(ExifTag::Orientation) {
     dng.root_ifd_mut().add_tag(ExifTag::Orientation, rawimage.orientation.to_u16());
   }
@@ -200,17 +221,22 @@ where
     }));
   }
 
-  // Remove makernotes from EXIF if MakerNoteSafety is not 1 (safe)
-  if let Some(Entry {
-    value: crate::formats::tiff::Value::Short(v),
-    ..
-  }) = decoder
+  // Remove MakerNotes unless the decoder explicitly marks them safe (MakerNoteSafety == 1).
+  // Default is to strip them; relative offsets would be invalid in the re-written DNG.
+  let makernote_is_safe = decoder
     .ifd(WellKnownIFD::VirtualDngRootTags)?
     .and_then(|ifd| ifd.get_entry(DngTag::MakerNoteSafety).cloned())
-  {
-    if v.get(0).copied().unwrap_or(0) == 0 {
-      dng.exif_ifd_mut().remove_tag(ExifTag::MakerNotes);
-    }
+    .and_then(|entry| {
+      if let crate::formats::tiff::Value::Short(v) = entry.value {
+        v.into_iter().next()
+      } else {
+        None
+      }
+    })
+    .unwrap_or(0)
+    == 1;
+  if !makernote_is_safe {
+    dng.exif_ifd_mut().remove_tag(ExifTag::MakerNotes);
   }
 
   if let Some(xpacket) = decoder.xpacket(rawfile, &raw_params)? {

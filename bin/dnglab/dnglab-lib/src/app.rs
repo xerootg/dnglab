@@ -102,7 +102,12 @@ pub fn create_app() -> Command {
         .value_parser(value_parser!(CropMode))
         .default_value("best"),
     )
-    .arg(arg!(-f --override "Override existing files").action(ArgAction::SetTrue));
+    .arg(arg!(-f --override "Override existing files").action(ArgAction::SetTrue))
+    .arg(
+      arg!(dcp_dir: --"dcp-dir" <dcp_dir> "Path to a directory containing DNG Camera Profile (.dcp) files")
+        .required(false)
+        .value_parser(clap::value_parser!(PathBuf)),
+    );
 
   command!()
     .about("DNGLab - A camera raw utility and DNG converter")

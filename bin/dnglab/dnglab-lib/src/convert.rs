@@ -122,6 +122,7 @@ fn generate_job(entry: &FileMap, options: &ArgMatches) -> Result<Vec<Raw2DngJob>
       index: if do_batch { i } else { index },
       apply_scaling: false,
       keep_mtime: options.get_flag("keep_mtime"),
+      dcp_dir: options.get_one::<PathBuf>("dcp_dir").cloned(),
     };
 
     let input = PathBuf::from(&entry.src);
