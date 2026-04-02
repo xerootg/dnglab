@@ -59,6 +59,11 @@ pub struct Exif {
   pub gps: Option<ExifGPS>,
   pub user_comment: Option<String>,
   pub makernotes: Option<Vec<u8>>,
+  pub rating: Option<u16>,
+  pub flashpix_version: Option<Vec<u8>>,
+  pub custom_rendered: Option<u16>,
+  pub digital_zoom_ratio: Option<Rational>,
+  pub gain_control: Option<u16>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -163,6 +168,11 @@ impl Exif {
           (ExifTag::LensSerialNumber, Value::Ascii(data)) => self.lens_serial_number = data.strings().get(0).map(trim),
           (ExifTag::UserComment, Value::Ascii(data)) => self.user_comment = data.strings().get(0).map(trim),
           (ExifTag::MakerNotes, Value::Undefined(data)) => self.makernotes = Some(data.clone()),
+          (ExifTag::Rating, Value::Short(data)) => self.rating = data.get(0).cloned(),
+          (ExifTag::FlashpixVersion, Value::Undefined(data)) => self.flashpix_version = Some(data.clone()),
+          (ExifTag::CustomRendered, Value::Short(data)) => self.custom_rendered = data.get(0).cloned(),
+          (ExifTag::DigitalZoomRatio, Value::Rational(data)) => self.digital_zoom_ratio = data.get(0).cloned(),
+          (ExifTag::GainControl, Value::Short(data)) => self.gain_control = data.get(0).cloned(),
           (tag, _value) => {
             log::debug!("Ignoring EXIF tag: {:?}", tag);
           }

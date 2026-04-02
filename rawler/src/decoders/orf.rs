@@ -264,15 +264,30 @@ impl<'a> Decoder for OrfDecoder<'a> {
   }
 
   fn ifd(&self, wk_ifd: WellKnownIFD) -> crate::Result<Option<Rc<IFD>>> {
-    if !matches!(wk_ifd, WellKnownIFD::VirtualDngRawTags) || self.opcode_list2.is_empty() {
-      return Ok(None);
+    match wk_ifd {
+      WellKnownIFD::VirtualDngRootTags => {
+        let mut ifd = IFD::default();
+        // Olympus MakerNotes use offsets relative to the MakerNote start, not
+        // the file start, so they are self-contained and safe to copy verbatim.
+        ifd.entries.insert(
+          DngTag::MakerNoteSafety.into(),
+          Entry { tag: DngTag::MakerNoteSafety.into(), value: Value::Short(vec![1]), embedded: None },
+        );
+        Ok(Some(Rc::new(ifd)))
+      }
+      WellKnownIFD::VirtualDngRawTags => {
+        if self.opcode_list2.is_empty() {
+          return Ok(None);
+        }
+        let mut ifd = IFD::default();
+        ifd.entries.insert(
+          DngTag::OpcodeList2.into(),
+          Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(self.opcode_list2.clone()), embedded: None },
+        );
+        Ok(Some(Rc::new(ifd)))
+      }
+      _ => Ok(None),
     }
-    let mut ifd = IFD::default();
-    ifd.entries.insert(
-      DngTag::OpcodeList2.into(),
-      Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(self.opcode_list2.clone()), embedded: None },
-    );
-    Ok(Some(Rc::new(ifd)))
   }
 }
 

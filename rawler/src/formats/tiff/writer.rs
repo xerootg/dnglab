@@ -331,6 +331,10 @@ impl crate::decoders::RawMetadata {
     transfer_entry(exif_ifd, ExifTag::LensModel, &exif.lens_model)?;
     transfer_entry(exif_ifd, ExifTag::UserComment, &exif.user_comment)?;
     transfer_entry_undefined(exif_ifd, ExifTag::MakerNotes, &exif.makernotes)?;
+    transfer_entry_undefined(exif_ifd, ExifTag::FlashpixVersion, &exif.flashpix_version)?;
+    transfer_entry(exif_ifd, ExifTag::CustomRendered, &exif.custom_rendered)?;
+    transfer_entry(exif_ifd, ExifTag::DigitalZoomRatio, &exif.digital_zoom_ratio)?;
+    transfer_entry(exif_ifd, ExifTag::GainControl, &exif.gain_control)?;
 
     Ok(())
   }
@@ -343,6 +347,7 @@ impl crate::decoders::RawMetadata {
     transfer_entry(root_ifd, ExifTag::ModifyDate, &self.exif.modify_date)?;
     transfer_entry(root_ifd, ExifTag::Copyright, &self.exif.copyright)?;
     transfer_entry(root_ifd, ExifTag::Artist, &self.exif.artist)?;
+    transfer_entry(root_ifd, ExifTag::Rating, &self.exif.rating)?;
 
     if let Some(gps) = &self.exif.gps {
       let gps_offset = {
