@@ -1,6 +1,7 @@
 use std::cmp;
 use std::io::Read;
 use std::io::Seek;
+use std::rc::Rc;
 
 use crate::RawImage;
 use crate::RawLoader;
@@ -10,6 +11,7 @@ use crate::alloc_image;
 use crate::analyze::FormatDump;
 use crate::buffer::PaddedBuf;
 use crate::decompressors::packed::*;
+use crate::dng::opcodes;
 use crate::exif::Exif;
 use crate::formats::tiff::Entry;
 use crate::formats::tiff::GenericTiffReader;
@@ -28,6 +30,7 @@ use crate::pumps::BitPumpMSB;
 use crate::rawimage::CFAConfig;
 use crate::rawimage::RawPhotometricInterpretation;
 use crate::rawsource::RawSource;
+use crate::tags::DngTag;
 use crate::tags::ExifTag;
 use crate::tags::TiffCommonTag;
 
@@ -37,6 +40,7 @@ use super::Decoder;
 use super::FormatHint;
 use super::RawDecodeParams;
 use super::RawMetadata;
+use super::WellKnownIFD;
 
 const MFT_MOUNT: &str = "MFT-mount";
 
@@ -47,6 +51,7 @@ pub struct OrfDecoder<'a> {
   tiff: GenericTiffReader,
   camera: Camera,
   makernote: IFD,
+  opcode_list2: Vec<u8>,
 }
 
 pub fn parse_makernote<R: Read + Seek>(reader: &mut R, exif_ifd: &IFD) -> Result<Option<IFD>> {
@@ -130,11 +135,14 @@ impl<'a> OrfDecoder<'a> {
 
     //makernote.dump::<ExifTag>(0).iter().for_each(|line| eprintln!("DUMP: {}", line));
 
+    let opcode_list2 = build_orf_warp_rectilinear(&makernote).unwrap_or_default();
+
     Ok(OrfDecoder {
       tiff,
       rawloader,
       camera,
       makernote,
+      opcode_list2,
     })
   }
 }
@@ -253,6 +261,18 @@ impl<'a> Decoder for OrfDecoder<'a> {
 
   fn format_hint(&self) -> FormatHint {
     FormatHint::ORF
+  }
+
+  fn ifd(&self, wk_ifd: WellKnownIFD) -> crate::Result<Option<Rc<IFD>>> {
+    if !matches!(wk_ifd, WellKnownIFD::VirtualDngRawTags) || self.opcode_list2.is_empty() {
+      return Ok(None);
+    }
+    let mut ifd = IFD::default();
+    ifd.entries.insert(
+      DngTag::OpcodeList2.into(),
+      Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(self.opcode_list2.clone()), embedded: None },
+    );
+    Ok(Some(Rc::new(ifd)))
   }
 }
 
@@ -492,6 +512,12 @@ pub enum OrfImageProcessing {
   CropTop = 0x0613,
   CropWidth = 0x0614,
   CropHeight = 0x0615,
+  /// Distortion correction valid flag: 1 = coefficients below are valid.
+  DistortionCorrectionValid = 0x150f,
+  /// Primary radial distortion coefficients: float[4] = [k1, k2, k3, scale].
+  /// The correction formula is `Ru = scale * Rd * (1 + k1·Rd² + k2·Rd⁴ + k3·Rd⁶)`
+  /// where Rd and Ru are pixel radii normalised to the image half-diagonal.
+  DistortionCoefficients = 0x1510,
 }
 
 #[allow(non_camel_case_types)]
@@ -499,4 +525,61 @@ pub enum OrfImageProcessing {
 #[repr(u16)]
 pub enum OrfEquipmentTags {
   LensType = 0x0201,
+}
+
+/// Build a DNG WarpRectilinear OpcodeList2 blob from the Olympus ImageProcessing IFD.
+///
+/// Reads tags 0x150f (validity flag) and 0x1510 (float[4] = [k1, k2, k3, scale]).
+///
+/// The Olympus correction model is:
+///   `Ru = scale * Rd * (1 + k1·Rd² + k2·Rd⁴ + k3·Rd⁶)`
+///
+/// which expands to the DNG WarpRectilinear polynomial:
+///   `Ru = scale·Rd + scale·k1·Rd³ + scale·k2·Rd⁵ + scale·k3·Rd⁷`
+///
+/// Both use the image half-diagonal as the normalisation radius, so
+/// the coefficients can be passed directly to the DNG encoder as:
+///   kr0 = scale,  kr1 = scale·k1,  kr2 = scale·k2,  kr3 = scale·k3
+///
+/// Returns `None` if the flag is absent/zero or the coefficient tag is missing.
+fn build_orf_warp_rectilinear(makernote: &IFD) -> Option<Vec<u8>> {
+  // Look for the ImageProcessing sub-IFD
+  let ifds = makernote.find_ifds_with_tag(OrfImageProcessing::DistortionCoefficients);
+  let imgproc = ifds.first()?;
+
+  // Check validity flag (tag 0x150f) — value 1 means the data is valid
+  let valid = imgproc
+    .get_entry(OrfImageProcessing::DistortionCorrectionValid)
+    .map(|e| e.force_u8(0))
+    .unwrap_or(0);
+  if valid == 0 {
+    log::debug!("ORF DistortionCorrectionValid = 0, skipping WarpRectilinear");
+    return None;
+  }
+
+  // Tag 0x1510: float[4] = [k1, k2, k3, scale]
+  let entry = imgproc.get_entry(OrfImageProcessing::DistortionCoefficients)?;
+  if entry.count() < 4 {
+    return None;
+  }
+  let k1 = entry.force_f32(0) as f64;
+  let k2 = entry.force_f32(1) as f64;
+  let k3 = entry.force_f32(2) as f64;
+  let scale = entry.force_f32(3) as f64;
+
+  if scale == 0.0 {
+    return None;
+  }
+
+  let kr0 = scale;
+  let kr1 = scale * k1;
+  let kr2 = scale * k2;
+  let kr3 = scale * k3;
+
+  log::debug!("ORF WarpRectilinear: kr0={:.6} kr1={:.6} kr2={:.6} kr3={:.6}", kr0, kr1, kr2, kr3);
+
+  let kr = [[kr0, kr1, kr2, kr3]];
+  let kt = [[0.0_f64, 0.0_f64]];
+  let opcode = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+  Some(opcodes::encode_opcode_list(&[opcode]))
 }
