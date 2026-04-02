@@ -389,6 +389,10 @@ impl<'a> Decoder for NefDecoder<'a> {
     FormatHint::NEF
   }
 
+  fn xpacket(&self, _file: &RawSource, _params: &RawDecodeParams) -> crate::Result<Option<Vec<u8>>> {
+    Ok(self.tiff.get_entry(TiffCommonTag::Xmp).map(|e| e.get_data().to_vec()))
+  }
+
   fn ifd(&self, wk_ifd: WellKnownIFD) -> crate::Result<Option<Rc<IFD>>> {
     match wk_ifd {
       WellKnownIFD::VirtualDngRootTags => {

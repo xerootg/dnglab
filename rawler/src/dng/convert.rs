@@ -239,7 +239,19 @@ where
     dng.exif_ifd_mut().remove_tag(ExifTag::MakerNotes);
   }
 
-  if let Some(xpacket) = decoder.xpacket(rawfile, &raw_params)? {
+  if let Some(mut xpacket) = decoder.xpacket(rawfile, &raw_params)? {
+    // If we injected a DCP profile, update crd:CameraProfile in the XMP to
+    // match the profile name so that ACR/Lightroom picks up the right profile.
+    if let Some(dcp_dir) = &params.dcp_dir {
+      let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
+      if let Some(dcp_path) = find_dcp(dcp_dir, &unique_model) {
+        if let Ok(profile) = DcpProfile::load(&dcp_path) {
+          if let Some(name) = profile.profile_name() {
+            xpacket = patch_xmp_camera_profile(xpacket, &name);
+          }
+        }
+      }
+    }
     dng.xpacket(&xpacket)?;
   }
 
@@ -262,6 +274,49 @@ where
   dng.close()?;
 
   Ok(())
+}
+
+/// Replace the value of `crd:CameraProfile` in an XMP byte packet.
+///
+/// The XMP spec allows both attribute form (`crd:CameraProfile="…"`) and
+/// element form (`<crd:CameraProfile>…</crd:CameraProfile>`).  Nikon cameras
+/// use the element form, but we handle both for robustness.  The replacement
+/// is a plain byte-level find-and-replace on UTF-8; no XML parser needed
+/// because `crd:CameraProfile` is always a simple scalar string in practice.
+fn patch_xmp_camera_profile(mut xmp: Vec<u8>, profile_name: &str) -> Vec<u8> {
+  let src = std::str::from_utf8(&xmp).ok().and_then(|s| {
+    // Element form: <crd:CameraProfile>VALUE</crd:CameraProfile>
+    let open = "<crd:CameraProfile>";
+    let close = "</crd:CameraProfile>";
+    if let (Some(start), Some(end)) = (s.find(open), s.find(close)) {
+      let value_start = start + open.len();
+      if value_start <= end {
+        return Some((value_start, end, s[value_start..end].to_owned()));
+      }
+    }
+    // Attribute form: crd:CameraProfile="VALUE"
+    let attr = "crd:CameraProfile=\"";
+    if let Some(pos) = s.find(attr) {
+      let value_start = pos + attr.len();
+      if let Some(end_quote) = s[value_start..].find('"') {
+        return Some((value_start, value_start + end_quote, s[value_start..value_start + end_quote].to_owned()));
+      }
+    }
+    None
+  });
+
+  if let Some((start, end, old_value)) = src {
+    let new_bytes = profile_name.as_bytes();
+    let old_bytes = old_value.as_bytes();
+    // Splice: bytes[..start] + new_value + bytes[end..]
+    let mut result = Vec::with_capacity(xmp.len() - old_bytes.len() + new_bytes.len());
+    result.extend_from_slice(&xmp[..start]);
+    result.extend_from_slice(new_bytes);
+    result.extend_from_slice(&xmp[end..]);
+    log::debug!("XMP crd:CameraProfile: '{}' → '{}'", old_value, profile_name);
+    xmp = result;
+  }
+  xmp
 }
 
 fn generate_preview(rawfile: &RawSource, decoder: &dyn Decoder, rawimage: &RawImage, params: &RawDecodeParams) -> crate::Result<DynamicImage> {

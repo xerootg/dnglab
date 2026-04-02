@@ -50,6 +50,14 @@ impl DcpProfile {
   pub fn has_forward_matrix(&self) -> bool {
     self.ifd.get_entry(DngTag::ForwardMatrix1).is_some()
   }
+
+  /// Returns the `ProfileName` string from the DCP, if present.
+  pub fn profile_name(&self) -> Option<String> {
+    self
+      .ifd
+      .get_entry(DngTag::ProfileName)
+      .and_then(|e| e.value.as_string().cloned())
+  }
 }
 
 /// Tags from a DCP that we propagate into the output DNG root IFD.
