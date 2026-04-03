@@ -187,7 +187,13 @@ fn decode_ljpeg(src: &[u8], width: usize, height: usize, dng_bug: bool, csfix: b
 fn decode_nef(data: &[u8], width: usize, height: usize, endian: Endian, bps: usize) -> Result<RawImageData> {
   let meta = data;
   let data = &data[4096..];
-  Ok(RawImageData::Integer(
-    nef::NefDecoder::do_decode(data, meta, endian, width, height, bps, false).unwrap().into_inner(),
-  ))
+  let (pixels, table) = nef::NefDecoder::do_decode(data, meta, endian, width, height, bps, false).unwrap();
+  let mut out = pixels.into_inner();
+  if let Some(table) = table {
+    let table_max = table.len() - 1;
+    for v in out.iter_mut() {
+      *v = table[(*v as usize).min(table_max)];
+    }
+  }
+  Ok(RawImageData::Integer(out))
 }

@@ -246,6 +246,10 @@ pub struct RawImage {
 
   pub dng_tags: HashMap<u16, Value>,
 
+  /// Linearization table mapping raw sensor values to linear values.
+  /// When present, DNG writer stores it as LinearizationTable tag.
+  pub linearization_table: Option<Vec<u16>>,
+
   /// For Fuji rotated sensors: the split point T used to compute the
   /// inscribed rectangle after 45° rotation (equivalent to dcraw's fuji_width).
   pub fuji_rotation_width: Option<usize>,
@@ -399,6 +403,7 @@ impl RawImage {
       orientation: Orientation::Normal, //cam.orientation, // TODO fixme
       color_matrix: cam.color_matrix,
       dng_tags: HashMap::new(),
+      linearization_table: None,
       fuji_rotation_width: None,
     }
   }
@@ -489,6 +494,7 @@ impl RawImage {
       orientation: Orientation::Normal, //cam.orientation, // TODO fixme
       color_matrix: cam.color_matrix,
       dng_tags: HashMap::new(),
+      linearization_table: None,
       fuji_rotation_width: None,
     }
   }
@@ -595,7 +601,24 @@ impl RawImage {
   }
 
   pub fn linearize(&self) -> Result<Self> {
-    todo!()
+    let Some(table) = &self.linearization_table else {
+      return Ok(self.clone());
+    };
+    let data = match &self.data {
+      RawImageData::Integer(pixels) => {
+        let table_max = table.len() - 1;
+        let linearized: Vec<u16> = pixels.iter().map(|&v| table[(v as usize).min(table_max)]).collect();
+        RawImageData::Integer(linearized)
+      }
+      RawImageData::Float(_) => return Ok(self.clone()),
+    };
+    let max_output = table.iter().copied().max().unwrap_or(u16::MAX) as u32;
+    let mut result = self.clone();
+    result.data = data;
+    result.whitelevel = WhiteLevel::new(vec![max_output; self.cpp]);
+    result.bps = 16;
+    result.linearization_table = None;
+    Ok(result)
   }
 
   /// Outputs the inverted matrix that converts pixels in the camera colorspace into

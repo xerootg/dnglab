@@ -128,17 +128,17 @@ where
         if rawimage.cpp == 3 {
           self.write_rawimage(Cow::Borrowed(rawimage), cropmode, compression, predictor)?;
         } else {
-          let rawimage = rawimage.linearize().unwrap(); // TODO: implement me
+          let rawimage = rawimage
+            .linearize()
+            .map_err(|e| TiffError::General(e.to_string()))?;
           self.write_rawimage(Cow::Borrowed(&rawimage), cropmode, compression, predictor)?;
         }
       }
     }
 
-    /*
     for (tag, value) in rawimage.dng_tags.iter() {
-      self.ifd.add_untyped_tag(*tag, value.clone())?;
+      self.ifd_mut().add_untyped_tag(*tag, value.clone());
     }
-     */
 
     Ok(())
   }
@@ -306,11 +306,13 @@ where
       }
     }
 
-    /*
-    for (tag, value) in rawimage.dng_tags.iter() {
-      self.ifd.add_untyped_tag(*tag, value.clone())?;
+    if let Some(table) = &rawimage.linearization_table {
+      self.ifd_mut().add_tag(DngTag::LinearizationTable, table.as_slice());
     }
-     */
+
+    for (tag, value) in rawimage.dng_tags.iter() {
+      self.ifd_mut().add_untyped_tag(*tag, value.clone());
+    }
 
     Ok(())
   }

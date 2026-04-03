@@ -10,7 +10,7 @@ use crate::RawImage;
 use crate::RawLoader;
 use crate::RawlerError;
 use crate::Result;
-use crate::alloc_image_ok;
+use crate::alloc_image_plain;
 use crate::analyze::FormatDump;
 use crate::bits::BEu16;
 use crate::bits::BEu32;
@@ -261,6 +261,7 @@ impl<'a> Decoder for NefDecoder<'a> {
 
     assert_eq!(self.tiff.little_endian(), self.makernote.endian == Endian::Little);
 
+    let mut linearization_table: Option<Vec<u16>> = None;
     let image = if self.camera.model == "NIKON D100" {
       width = 3040;
       decompress_12be_wcontrol(&src, width, height, dummy)?
@@ -312,7 +313,9 @@ impl<'a> Decoder for NefDecoder<'a> {
       cpp = 3;
       Self::decode_snef_compressed(&src, coeffs, width, height, dummy)?
     } else if compression == 34713 {
-      self.decode_compressed(&src, width, height, bps, dummy)?
+      let (pixels, table) = self.decode_compressed(&src, width, height, bps, dummy)?;
+      linearization_table = table;
+      pixels
     } else {
       return Err(RawlerError::unsupported(&self.camera, format!("NEF: Don't know compression {}", compression)));
     };
@@ -326,6 +329,7 @@ impl<'a> Decoder for NefDecoder<'a> {
       _ => todo!(),
     };
     let mut img = RawImage::new(self.camera.clone(), image, cpp, coeffs, photometric, blacklevel, whitelevel, dummy);
+    img.linearization_table = linearization_table;
 
     if let Some(crop) = self.get_crop()? {
       debug!("RAW Crops: {:?}", crop);
@@ -404,6 +408,52 @@ impl<'a> Decoder for NefDecoder<'a> {
           DngTag::MakerNoteSafety.into(),
           Entry { tag: DngTag::MakerNoteSafety.into(), value: Value::Short(vec![1]), embedded: None },
         );
+
+        // Extract NefMeta1 tone curve control points as DNG ProfileToneCurve.
+        // NefMeta1 layout: byte 8 = num_points, bytes 10+ = (input, output) u8 pairs.
+        // The last point is a sentinel (output=0) and is skipped.
+        if let Some(meta1) = self.makernote.get_entry(TiffCommonTag::NefMeta1) {
+          let data = meta1.get_data();
+          if data.len() >= 10 {
+            let num_points = data[8] as usize;
+            if data.len() >= 10 + num_points * 2 {
+              let mut curve_points: Vec<f32> = Vec::new();
+              // Add implicit (0.0, 0.0) start point
+              curve_points.push(0.0);
+              curve_points.push(0.0);
+              for i in 0..num_points {
+                let input = data[10 + i * 2] as f32 / 255.0;
+                let output = data[10 + i * 2 + 1] as f32 / 255.0;
+                // Skip sentinel points (output == 0 with non-zero input)
+                if output == 0.0 && input > 0.0 {
+                  continue;
+                }
+                curve_points.push(input);
+                curve_points.push(output);
+              }
+              // Add implicit (1.0, 1.0) end point if not already present
+              if curve_points.len() >= 2 {
+                let last_in = curve_points[curve_points.len() - 2];
+                let last_out = curve_points[curve_points.len() - 1];
+                if last_in < 1.0 || last_out < 1.0 {
+                  curve_points.push(1.0);
+                  curve_points.push(1.0);
+                }
+              }
+              if curve_points.len() >= 4 {
+                ifd.entries.insert(
+                  DngTag::ProfileToneCurve.into(),
+                  Entry {
+                    tag: DngTag::ProfileToneCurve.into(),
+                    value: Value::Float(curve_points),
+                    embedded: None,
+                  },
+                );
+              }
+            }
+          }
+        }
+
         Ok(Some(Rc::new(ifd)))
       }
       WellKnownIFD::VirtualDngRawTags => {
@@ -638,7 +688,7 @@ impl<'a> NefDecoder<'a> {
     })
   }
 
-  fn decode_compressed(&self, src: &PaddedBuf, width: usize, height: usize, bps: usize, dummy: bool) -> std::result::Result<PixU16, String> {
+  fn decode_compressed(&self, src: &PaddedBuf, width: usize, height: usize, bps: usize, dummy: bool) -> std::result::Result<(PixU16, Option<Vec<u16>>), String> {
     let meta = if let Some(meta) = self.makernote.get_entry(TiffCommonTag::NefMeta2) {
       debug!("Found NefMeta2");
       meta
@@ -657,9 +707,12 @@ impl<'a> NefDecoder<'a> {
     height: usize,
     bps: usize,
     dummy: bool,
-  ) -> std::result::Result<PixU16, String> {
+  ) -> std::result::Result<(PixU16, Option<Vec<u16>>), String> {
     debug!("NEF decode with: endian: {:?}, width: {}, height: {}, bps: {}", endian, width, height, bps);
-    let mut out = alloc_image_ok!(width, height, dummy);
+    if dummy {
+      return Ok((PixU16::new_uninit(width, height), None));
+    }
+    let mut out = alloc_image_plain!(width, height, dummy);
     let mut stream = ByteStream::new(meta, endian);
     let v0 = stream.get_u8();
     let v1 = stream.get_u8();
@@ -726,6 +779,8 @@ impl<'a> NefDecoder<'a> {
       max = csize;
     }
     let curve = LookupTable::new(&points[0..max]);
+    let is_identity = points[0..max].iter().enumerate().all(|(i, &v)| v == i as u16);
+    let linearization_table = if is_identity { None } else { Some(points[0..max].to_vec()) };
 
     let mut pump = BitPumpMSB::new(src);
     let mut random = pump.peek_bits(24);
@@ -743,12 +798,17 @@ impl<'a> NefDecoder<'a> {
           pred_left1 += htable.huff_decode(&mut pump)?;
           pred_left2 += htable.huff_decode(&mut pump)?;
         }
-        out[row * width + col + 0] = curve.dither(clampbits(pred_left1, real_bps), &mut random);
-        out[row * width + col + 1] = curve.dither(clampbits(pred_left2, real_bps), &mut random);
+        if is_identity {
+          out[row * width + col + 0] = curve.dither(clampbits(pred_left1, real_bps), &mut random);
+          out[row * width + col + 1] = curve.dither(clampbits(pred_left2, real_bps), &mut random);
+        } else {
+          out[row * width + col + 0] = clampbits(pred_left1, real_bps);
+          out[row * width + col + 1] = clampbits(pred_left2, real_bps);
+        }
       }
     }
 
-    Ok(out)
+    Ok((out, linearization_table))
   }
 
   // Decodes 12 bit data in an YUY2-like pattern (2 Luma, 1 Chroma per 2 pixels).
