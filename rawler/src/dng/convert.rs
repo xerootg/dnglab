@@ -13,7 +13,7 @@ use crate::{
   dcp::{DcpProfile, find_dcp},
   decoders::{Decoder, RawDecodeParams, RawPhotometricInterpretation, WellKnownIFD, WhiteLevel},
   dng::{DNG_VERSION_V1_4, PREVIEW_JPEG_QUALITY, original::OriginalCompressed, writer::DngWriter},
-
+  formats::tiff::{Rational, SRational},
   imgop::{
     develop::RawDevelop,
     fuji_rotate::fuji_normalize_rotation,
@@ -165,25 +165,72 @@ where
   }
   raw.finalize()?;
 
-  // Write preview and thumbnail if requested
+  // Write preview and thumbnail if requested.
+  // Prefer raw JPEG passthrough (preview_jpeg) to avoid decode+re-encode overhead.
   if params.preview || params.thumbnail {
-    match generate_preview(rawfile, decoder.as_ref(), &rawimage, &raw_params) {
-      Ok(image) => {
-        if params.preview {
+    let mut preview_written = false;
+    if params.preview {
+      match decoder.preview_jpeg(rawfile, &raw_params) {
+        Ok(Some((jpeg_data, width, height))) if width > 0 && height > 0 => {
           let mut preview = dng.subframe(1);
-          preview.preview(&image, PREVIEW_JPEG_QUALITY)?;
+          preview.preview_jpeg(&jpeg_data, width, height)?;
           preview.finalize()?;
+          if params.thumbnail {
+            // Decode JPEG for thumbnail since we need a resized image
+            if let Ok(img) = image::load_from_memory_with_format(&jpeg_data, image::ImageFormat::Jpeg) {
+              dng.thumbnail(&img)?;
+            }
+          }
+          preview_written = true;
         }
-        if params.thumbnail {
-          dng.thumbnail(&image)?;
-        }
+        _ => {}
       }
-      Err(err) => log::warn!("Failed to get review image, continue anyway: {:?}", err),
+    }
+    if !preview_written {
+      match generate_preview(rawfile, decoder.as_ref(), &rawimage, &raw_params) {
+        Ok(image) => {
+          if params.preview {
+            let mut preview = dng.subframe(1);
+            preview.preview(&image, PREVIEW_JPEG_QUALITY)?;
+            preview.finalize()?;
+          }
+          if params.thumbnail {
+            dng.thumbnail(&image)?;
+          }
+        }
+        Err(err) => log::warn!("Failed to get review image, continue anyway: {:?}", err),
+      }
     }
   }
   // Write metadata
   dng.load_base_tags(&rawimage)?;
   dng.load_metadata(&metadata)?;
+
+  // Write DNG-specific metadata tags
+  // ColorimetricReference: 0 = scene-referred (standard for raw files)
+  dng.colorimetric_reference(0);
+
+  // CameraSerialNumber from EXIF
+  if let Some(serial) = &metadata.exif.serial_number {
+    dng.camera_serial_number(serial);
+  }
+
+  // Baseline tags from camera definition
+  if let Some(be) = rawimage.camera.baseline_exposure {
+    dng.baseline_exposure(SRational::new((be * 100.0) as i32, 100));
+  }
+  if let Some(bn) = rawimage.camera.baseline_noise {
+    dng.baseline_noise(Rational::new((bn * 100.0) as u32, 100));
+  }
+  if let Some(bs) = rawimage.camera.baseline_sharpness {
+    dng.baseline_sharpness(Rational::new((bs * 100.0) as u32, 100));
+  }
+  if let Some(lrl) = rawimage.camera.linear_response_limit {
+    dng.linear_response_limit(Rational::new((lrl * 100.0) as u32, 100));
+  }
+  if let Some(ref np) = rawimage.camera.noise_profile {
+    dng.noise_profile(np);
+  }
 
   // Apply DCP color profile if a profiles directory was provided
   if let Some(dcp_dir) = &params.dcp_dir {

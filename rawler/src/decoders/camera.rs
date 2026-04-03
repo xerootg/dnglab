@@ -29,6 +29,7 @@ pub struct Camera {
   pub blackareav: Option<(usize, usize)>,
   pub xyz_to_cam: [[f32; 3]; 4],
   pub color_matrix: HashMap<Illuminant, FlatColorMatrix>,
+  pub forward_matrix: HashMap<Illuminant, FlatColorMatrix>,
   pub cfa: CFA,
   pub plane_color: PlaneColor,
   // Active area relative to sensor size
@@ -44,6 +45,13 @@ pub struct Camera {
   pub best_quality_scale: BestQualityScale,
   pub hints: Vec<String>,
   pub params: HashMap<String, Value>,
+  pub baseline_exposure: Option<f32>,
+  pub baseline_noise: Option<f32>,
+  pub baseline_sharpness: Option<f32>,
+  pub linear_response_limit: Option<f32>,
+  /// NoiseProfile per DNG spec: pairs of (noise_scale, noise_offset) per color plane.
+  /// For a 3-plane sensor: [s0, o0, s1, o1, s2, o2] (6 doubles).
+  pub noise_profile: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,6 +243,36 @@ impl Camera {
         }
         "model_aliases" => {}
         "modes" => {} // ignore
+        "forward_matrix" => {
+          if let Some(forward_matrix) = val.as_table() {
+            for (illu_str, matrix) in forward_matrix.into_iter() {
+              let illu = Illuminant::new_from_str(illu_str).unwrap();
+              let mat = matrix
+                .as_array()
+                .expect("forward matrix must be array")
+                .iter()
+                .map(|a| a.as_float().expect("forward matrix values must be float") as f32)
+                .collect();
+              self.forward_matrix.insert(illu, mat);
+            }
+          }
+        }
+        n @ "baseline_exposure" => {
+          self.baseline_exposure = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+        }
+        n @ "baseline_noise" => {
+          self.baseline_noise = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+        }
+        n @ "baseline_sharpness" => {
+          self.baseline_sharpness = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+        }
+        n @ "linear_response_limit" => {
+          self.linear_response_limit = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+        }
+        "noise_profile" => {
+          let arr = val.as_array().expect("noise_profile must be an array of floats");
+          self.noise_profile = Some(arr.iter().map(|v| v.as_float().expect("noise_profile values must be floats")).collect());
+        }
         key => {
           panic!("Unknown key: {}", key);
         }
@@ -259,6 +297,7 @@ impl Camera {
       blackareav: None,
       xyz_to_cam: [[0.0; 3]; 4],
       color_matrix: HashMap::new(),
+      forward_matrix: HashMap::new(),
       cfa: CFA::new(""),
       plane_color: PlaneColor::default(),
       active_area: None,
@@ -270,6 +309,11 @@ impl Camera {
       best_quality_scale: BestQualityScale::default(),
       hints: Vec::new(),
       params: HashMap::new(),
+      baseline_exposure: None,
+      baseline_noise: None,
+      baseline_sharpness: None,
+      linear_response_limit: None,
+      noise_profile: None,
       //orientation: Orientation::Unknown,
     }
   }

@@ -5,10 +5,18 @@ clean_model = "Z f"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [8, 4, 8, 4]
+baseline_exposure = 0.25
+baseline_noise = 1.0
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
 
 [cameras.color_matrix]
 A = [1.3904, -0.7947, 0.0654, -0.432, 1.2105, 0.2497, -0.0235, 0.083, 0.9243]
 D65 = [1.1607, -0.4491, -0.0977, -0.4522, 1.246, 0.2304, -0.0458, 0.1519, 0.7616]
+
+[cameras.forward_matrix]
+A = [0.7018, 0.1359, 0.1266, 0.2614, 0.7030, 0.0356, 0.0002, 0.0793, 0.7457]
+D65 = [0.6656, 0.1232, 0.1755, 0.3004, 0.6474, 0.0522, 0.0001, 0.0022, 0.8228]
 
 #[[cameras.modes]]
 #mode = "12bit"

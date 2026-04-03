@@ -349,6 +349,11 @@ pub trait Decoder: Send {
     Ok(None)
   }
 
+  /// Return the raw JPEG preview bytes and (width, height) without decoding/re-encoding.
+  fn preview_jpeg(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    Ok(None)
+  }
+
   fn format_dump(&self) -> FormatDump;
 
   fn ifd(&self, _wk_ifd: WellKnownIFD) -> Result<Option<Rc<IFD>>> {

@@ -28,7 +28,6 @@ pub trait TiffReader {
       TiffCommonTag::SubIFDs.into(),
       TiffCommonTag::ExifIFDPointer.into(),
       ExifTag::GPSInfo.into(),
-      ExifTag::IccProfile.into(),
     ]
   }
 

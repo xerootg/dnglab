@@ -174,6 +174,28 @@ where
             .color_matrix(2, second_matrix.0, matrix_to_tiff_value(&second_matrix.1, 10_000).as_slice());
         }
       }
+
+      // Add forward matrix if available
+      let mut available_fwd = rawimage.forward_matrix.clone();
+      if !available_fwd.is_empty() {
+        if let Some(first_key) = available_fwd.keys().next().cloned() {
+          let first_fwd = available_fwd
+            .remove_entry(&Illuminant::A)
+            .or_else(|| available_fwd.remove_entry(&first_key))
+            .unwrap();
+          self
+            .writer
+            .forward_matrix(1, matrix_to_tiff_value(&first_fwd.1, 10_000).as_slice());
+          if let Some(second_fwd) = available_fwd
+            .remove_entry(&Illuminant::D65)
+            .or_else(|| available_fwd.remove_entry(&Illuminant::D50))
+          {
+            self
+              .writer
+              .forward_matrix(2, matrix_to_tiff_value(&second_fwd.1, 10_000).as_slice());
+          }
+        }
+      }
     }
 
     let full_size = Rect::new(Point::new(0, 0), Dim2::new(rawimage.width, rawimage.height));
@@ -356,6 +378,26 @@ where
     Ok(())
   }
 
+  /// Write a pre-encoded JPEG preview directly without re-encoding.
+  /// `jpeg_data` must be valid JPEG bytes. `width` and `height` are the image dimensions.
+  pub fn preview_jpeg(&mut self, jpeg_data: &[u8], width: u32, height: u32) -> Result<()> {
+    self.ifd_mut().add_tag(TiffCommonTag::ImageWidth, Value::long(width));
+    self.ifd_mut().add_tag(TiffCommonTag::ImageLength, Value::long(height));
+    self.ifd_mut().add_tag(TiffCommonTag::Compression, CompressionMethod::ModernJPEG);
+    self.ifd_mut().add_tag(TiffCommonTag::BitsPerSample, [8_u16, 8, 8]);
+    self.ifd_mut().add_tag(TiffCommonTag::SampleFormat, [1_u16, 1, 1]);
+    self.ifd_mut().add_tag(TiffCommonTag::PhotometricInt, PhotometricInterpretation::YCbCr);
+    self.ifd_mut().add_tag(TiffCommonTag::RowsPerStrip, Value::long(height));
+    self.ifd_mut().add_tag(TiffCommonTag::SamplesPerPixel, 3_u16);
+    self.ifd_mut().add_tag(DngTag::PreviewColorSpace, PreviewColorSpace::SRgb);
+
+    let offset = self.writer.dng.write_data(jpeg_data)?;
+    self.ifd_mut().add_tag(TiffCommonTag::StripOffsets, offset);
+    self.ifd_mut().add_tag(TiffCommonTag::StripByteCounts, jpeg_data.len() as u32);
+
+    Ok(())
+  }
+
   pub fn finalize(self) -> Result<()> {
     if let Some(ifd) = self.ifd {
       let offset = ifd.build(&mut self.writer.dng)?;
@@ -406,6 +448,46 @@ where
       }
       _ => todo!(),
     }
+  }
+
+  pub fn forward_matrix(&mut self, slot: usize, matrix: impl AsRef<[SRational]>) {
+    match slot {
+      1 => self.root_ifd.add_tag(DngTag::ForwardMatrix1, matrix.as_ref()),
+      2 => self.root_ifd.add_tag(DngTag::ForwardMatrix2, matrix.as_ref()),
+      _ => todo!(),
+    }
+  }
+
+  pub fn baseline_exposure(&mut self, ev: SRational) {
+    self.root_ifd.add_tag(DngTag::BaselineExposure, ev);
+  }
+
+  pub fn baseline_noise(&mut self, noise: Rational) {
+    self.root_ifd.add_tag(DngTag::BaselineNoise, noise);
+  }
+
+  pub fn baseline_sharpness(&mut self, sharpness: Rational) {
+    self.root_ifd.add_tag(DngTag::BaselineSharpness, sharpness);
+  }
+
+  pub fn linear_response_limit(&mut self, limit: Rational) {
+    self.root_ifd.add_tag(DngTag::LinearResponseLimit, limit);
+  }
+
+  pub fn camera_serial_number(&mut self, serial: &str) {
+    self.root_ifd.add_tag(DngTag::CameraSerialNumber, serial);
+  }
+
+  pub fn colorimetric_reference(&mut self, reference: u16) {
+    self.root_ifd.add_tag(DngTag::ColorimetricReference, reference);
+  }
+
+  pub fn as_shot_icc_profile(&mut self, profile: &[u8]) {
+    self.root_ifd.add_tag_undefined(DngTag::AsShotICCProfile, profile.to_vec());
+  }
+
+  pub fn noise_profile(&mut self, profile: &[f64]) {
+    self.root_ifd.add_tag(DngTag::NoiseProfile, profile);
   }
 
   pub fn load_metadata(&mut self, metadata: &RawMetadata) -> Result<()> {

@@ -389,6 +389,40 @@ impl<'a> Decoder for NefDecoder<'a> {
     }
   }
 
+  fn preview_jpeg(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if params.image_index != 0 {
+      return Ok(None);
+    }
+    let mut ifds = self.tiff.find_ifds_with_filter(|ifd| {
+      if ifd.get_new_sub_file_type() == Some(1) {
+        ifd.get_entry(ExifTag::JPEGInterchangeFormatLength).is_some()
+      } else {
+        false
+      }
+    });
+    ifds.sort_by(|a, b| {
+      a.get_entry(ExifTag::JPEGInterchangeFormatLength)
+        .map(|x| x.force_u32(0))
+        .cmp(&b.get_entry(ExifTag::JPEGInterchangeFormatLength).map(|x| x.force_u32(0)))
+    });
+    if let Some(jpeg_ifd) = ifds.last() {
+      let offset = fetch_tiff_tag!(jpeg_ifd, ExifTag::JPEGInterchangeFormat).force_usize(0) as u64;
+      let size = fetch_tiff_tag!(jpeg_ifd, ExifTag::JPEGInterchangeFormatLength).force_usize(0) as u64;
+      let buf = file.subview(offset, size)?;
+      let mut width = jpeg_ifd.get_entry(ExifTag::ImageWidth).map(|e| e.force_u32(0)).unwrap_or(0);
+      let mut height = jpeg_ifd.get_entry(ExifTag::ImageHeight).map(|e| e.force_u32(0)).unwrap_or(0);
+      // If IFD doesn't have dimensions, parse from JPEG SOF marker
+      if (width == 0 || height == 0) && buf.len() > 2 {
+        let (w, h) = jpeg_dimensions(buf);
+        width = w;
+        height = h;
+      }
+      Ok(Some((buf.to_vec(), width, height)))
+    } else {
+      Ok(None)
+    }
+  }
+
   fn format_hint(&self) -> FormatHint {
     FormatHint::NEF
   }
@@ -451,6 +485,21 @@ impl<'a> Decoder for NefDecoder<'a> {
                 );
               }
             }
+          }
+        }
+
+        // Extract ICC profile from source file as AsShotICCProfile.
+        if let Some(icc_entry) = self.tiff.get_entry(ExifTag::IccProfile) {
+          let icc_data = icc_entry.get_data().to_vec();
+          if !icc_data.is_empty() {
+            ifd.entries.insert(
+              DngTag::AsShotICCProfile.into(),
+              Entry {
+                tag: DngTag::AsShotICCProfile.into(),
+                value: Value::Undefined(icc_data),
+                embedded: None,
+              },
+            );
           }
         }
 
@@ -1114,4 +1163,42 @@ impl TryFrom<u16> for NefCompression {
       _ => return Err(format!("unknown nef compression: {}", v)),
     })
   }
+}
+
+/// Parse width and height from a JPEG's SOF marker.
+fn jpeg_dimensions(data: &[u8]) -> (u32, u32) {
+  let mut i = 0;
+  while i + 1 < data.len() {
+    if data[i] != 0xFF {
+      i += 1;
+      continue;
+    }
+    let marker = data[i + 1];
+    i += 2;
+    // Skip padding 0xFF bytes
+    if marker == 0xFF || marker == 0x00 {
+      continue;
+    }
+    // SOI, RST, EOI have no length
+    if marker == 0xD8 || (0xD0..=0xD7).contains(&marker) || marker == 0xD9 {
+      continue;
+    }
+    if i + 2 > data.len() {
+      break;
+    }
+    let len = ((data[i] as usize) << 8) | data[i + 1] as usize;
+    // SOF markers: 0xC0-0xC3, 0xC5-0xC7, 0xC9-0xCB, 0xCD-0xCF
+    if (marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) || (marker >= 0xC9 && marker <= 0xCF) {
+      if i + 7 <= data.len() {
+        let height = ((data[i + 3] as u32) << 8) | data[i + 4] as u32;
+        let width = ((data[i + 5] as u32) << 8) | data[i + 6] as u32;
+        return (width, height);
+      }
+    }
+    if len < 2 || i + len > data.len() {
+      break;
+    }
+    i += len;
+  }
+  (0, 0)
 }

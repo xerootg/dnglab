@@ -244,6 +244,8 @@ pub struct RawImage {
 
   pub color_matrix: HashMap<Illuminant, FlatColorMatrix>,
 
+  pub forward_matrix: HashMap<Illuminant, FlatColorMatrix>,
+
   pub dng_tags: HashMap<u16, Value>,
 
   /// Linearization table mapping raw sensor values to linear values.
@@ -401,6 +403,7 @@ impl RawImage {
       crop_area,
       blackareas,
       orientation: Orientation::Normal, //cam.orientation, // TODO fixme
+      forward_matrix: cam.forward_matrix,
       color_matrix: cam.color_matrix,
       dng_tags: HashMap::new(),
       linearization_table: None,
@@ -492,6 +495,7 @@ impl RawImage {
       crop_area,
       blackareas,
       orientation: Orientation::Normal, //cam.orientation, // TODO fixme
+      forward_matrix: cam.forward_matrix,
       color_matrix: cam.color_matrix,
       dng_tags: HashMap::new(),
       linearization_table: None,
