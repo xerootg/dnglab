@@ -92,6 +92,14 @@ pub fn parse_makernote<R: Read + Seek>(reader: &mut R, exif_ifd: &IFD) -> Result
           mainifd.sub.insert(OrfMakernotes::EquipmentIFD.into(), vec![ifd]);
         }
 
+        // Parse the Olympus CameraSettings section if it exists (contains preview image info)
+        if let Some(entry) = mainifd.get_entry_raw_with_len(OrfMakernotes::CameraSettingsIFD, reader, 4)? {
+          let ioff = entry.get_force_u32(0);
+          log::debug!("Found CameraSettingsIFD at offset: {}", ioff);
+          let ifd = IFD::new(reader, ioff, offset, 0, endian, &[])?;
+          mainifd.sub.insert(OrfMakernotes::CameraSettingsIFD.into(), vec![ifd]);
+        }
+
         // For Olympus or OM-System models
         if off == 12 || off == 16 {
           // Parse the Olympus ImgProc section if it exists
@@ -254,13 +262,71 @@ impl<'a> Decoder for OrfDecoder<'a> {
   }
 
   fn raw_metadata(&self, _file: &RawSource, __params: &RawDecodeParams) -> Result<RawMetadata> {
-    let exif = Exif::new(self.tiff.root_ifd())?;
+    let mut exif = Exif::new(self.tiff.root_ifd())?;
+
+    // Extract CameraSerialNumber and LensSerialNumber from MakerNotes EquipmentIFD
+    if let Some(equip_ifd) = self.makernote.get_sub_ifd(OrfMakernotes::EquipmentIFD) {
+      if exif.serial_number.is_none() {
+        if let Some(entry) = equip_ifd.get_entry(OrfEquipmentTags::SerialNumber) {
+          if let Value::Ascii(data) = &entry.value {
+            if let Some(serial) = data.strings().first() {
+              let serial = serial.trim().to_string();
+              if !serial.is_empty() {
+                exif.serial_number = Some(serial);
+              }
+            }
+          }
+        }
+      }
+      if exif.lens_serial_number.is_none() {
+        if let Some(entry) = equip_ifd.get_entry(OrfEquipmentTags::LensSerialNumber) {
+          if let Value::Ascii(data) = &entry.value {
+            if let Some(serial) = data.strings().first() {
+              let serial = serial.trim().to_string();
+              if !serial.is_empty() {
+                exif.lens_serial_number = Some(serial);
+              }
+            }
+          }
+        }
+      }
+    }
+
     let mdata = RawMetadata::new_with_lens(&self.camera, exif, self.get_lens_description()?.cloned());
     Ok(mdata)
   }
 
   fn format_hint(&self) -> FormatHint {
     FormatHint::ORF
+  }
+
+  fn preview_jpeg(&self, file: &RawSource, _params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if let Some(cs_ifd) = self.makernote.get_sub_ifd(OrfMakernotes::CameraSettingsIFD) {
+      let valid = cs_ifd
+        .get_entry(OrfCameraSettings::PreviewImageValid)
+        .map(|e| e.force_u32(0))
+        .unwrap_or(0);
+      if valid == 0 {
+        return Ok(None);
+      }
+      let offset = cs_ifd
+        .get_entry(OrfCameraSettings::PreviewImageStart)
+        .map(|e| e.force_u32(0) as u64)
+        .unwrap_or(0);
+      let length = cs_ifd
+        .get_entry(OrfCameraSettings::PreviewImageLength)
+        .map(|e| e.force_u32(0) as u64)
+        .unwrap_or(0);
+      if offset == 0 || length == 0 {
+        return Ok(None);
+      }
+      let buf = file.subview(offset, length)?;
+      let (width, height) = super::jpeg_dimensions(&buf);
+      if width > 0 && height > 0 {
+        return Ok(Some((buf.to_vec(), width, height)));
+      }
+    }
+    Ok(None)
   }
 
   fn ifd(&self, wk_ifd: WellKnownIFD) -> crate::Result<Option<Rc<IFD>>> {
@@ -503,16 +569,27 @@ fn normalize_wb(raw_wb: [f32; 4]) -> [f32; 4] {
 crate::tags::tiff_tag_enum!(OrfMakernotes);
 crate::tags::tiff_tag_enum!(OrfImageProcessing);
 crate::tags::tiff_tag_enum!(OrfEquipmentTags);
+crate::tags::tiff_tag_enum!(OrfCameraSettings);
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Copy, Clone, PartialEq, enumn::N)]
 #[repr(u16)]
 pub enum OrfMakernotes {
   ImageProcessingIFD = 0x2040,
+  CameraSettingsIFD = 0x2020,
   RawInfo = 0x3000,
   OlympusRedMul = 0x1017,
   OlympusBlueMul = 0x1018,
   EquipmentIFD = 0x2010,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Copy, Clone, PartialEq, enumn::N)]
+#[repr(u16)]
+pub enum OrfCameraSettings {
+  PreviewImageValid = 0x0100,
+  PreviewImageStart = 0x0101,
+  PreviewImageLength = 0x0102,
 }
 
 #[allow(non_camel_case_types)]
@@ -539,7 +616,9 @@ pub enum OrfImageProcessing {
 #[derive(Debug, Copy, Clone, PartialEq, enumn::N)]
 #[repr(u16)]
 pub enum OrfEquipmentTags {
+  SerialNumber = 0x0101,
   LensType = 0x0201,
+  LensSerialNumber = 0x0202,
 }
 
 /// Build a DNG WarpRectilinear OpcodeList2 blob from the Olympus ImageProcessing IFD.

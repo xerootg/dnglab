@@ -316,6 +316,7 @@ impl crate::decoders::RawMetadata {
     transfer_entry(exif_ifd, ExifTag::LightSource, &exif.light_source)?;
     transfer_entry(exif_ifd, ExifTag::Flash, &exif.flash)?;
     transfer_entry(exif_ifd, ExifTag::FocalLength, &exif.focal_length)?;
+    transfer_entry(exif_ifd, ExifTag::FocalLengthIn35mmFormat, &exif.focal_len_in_35mm_format)?;
     transfer_entry(exif_ifd, ExifTag::ImageNumber, &exif.image_number)?;
     transfer_entry(exif_ifd, ExifTag::ColorSpace, &exif.color_space)?;
     transfer_entry(exif_ifd, ExifTag::FlashEnergy, &exif.flash_energy)?;
@@ -335,6 +336,14 @@ impl crate::decoders::RawMetadata {
     transfer_entry(exif_ifd, ExifTag::CustomRendered, &exif.custom_rendered)?;
     transfer_entry(exif_ifd, ExifTag::DigitalZoomRatio, &exif.digital_zoom_ratio)?;
     transfer_entry(exif_ifd, ExifTag::GainControl, &exif.gain_control)?;
+    transfer_entry(exif_ifd, ExifTag::Contrast, &exif.contrast)?;
+    transfer_entry(exif_ifd, ExifTag::Saturation, &exif.saturation)?;
+    transfer_entry(exif_ifd, ExifTag::Sharpness, &exif.sharpness)?;
+    transfer_entry(exif_ifd, ExifTag::AmbientTemperature, &exif.ambient_temperature)?;
+    transfer_entry(exif_ifd, ExifTag::Pressure, &exif.pressure)?;
+    transfer_entry(exif_ifd, ExifTag::WaterDepth, &exif.water_depth)?;
+    transfer_entry(exif_ifd, ExifTag::Acceleration, &exif.acceleration)?;
+    transfer_entry_undefined(exif_ifd, ExifTag::FileSource, &exif.file_source)?;
 
     Ok(())
   }
@@ -348,6 +357,7 @@ impl crate::decoders::RawMetadata {
     transfer_entry(root_ifd, ExifTag::Copyright, &self.exif.copyright)?;
     transfer_entry(root_ifd, ExifTag::Artist, &self.exif.artist)?;
     transfer_entry(root_ifd, ExifTag::Rating, &self.exif.rating)?;
+    transfer_entry(root_ifd, ExifTag::ImageDescription, &self.exif.image_description)?;
 
     if let Some(gps) = &self.exif.gps {
       let gps_offset = {

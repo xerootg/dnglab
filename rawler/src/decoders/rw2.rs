@@ -239,12 +239,38 @@ impl<'a> Decoder for Rw2Decoder<'a> {
     Ok(None)
   }
 
+  fn preview_jpeg(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if let Some(data) = self.tiff.get_entry(PanasonicTag::JpegData) {
+      let buf = data.get_data();
+      let (width, height) = super::jpeg_dimensions(buf);
+      if width > 0 && height > 0 {
+        return Ok(Some((buf.to_vec(), width, height)));
+      }
+    }
+    Ok(None)
+  }
+
   fn format_dump(&self) -> FormatDump {
     todo!()
   }
 
   fn raw_metadata(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<RawMetadata> {
     let mut exif = Exif::new(self.tiff.root_ifd())?;
+    // The PanasonicRaw EXIF sub-IFD only has ~14 basic entries.
+    // The full standard EXIF (Contrast, Saturation, ExposureMode, etc.)
+    // lives in the embedded JPEG's EXIF structure. Parse it to fill gaps.
+    if let Some(jpeg_entry) = self.tiff.get_entry(PanasonicTag::JpegData) {
+      let jpeg_buf = jpeg_entry.get_data();
+      if let Some(exif_start) = jpeg_buf.windows(6).position(|w| w == b"Exif\x00\x00") {
+        let tiff_data = &jpeg_buf[exif_start + 6..];
+        if let Ok(jpeg_ifd) = IFD::new_root(&mut std::io::Cursor::new(tiff_data), 0) {
+          exif.extend_from_ifd(&jpeg_ifd)?;
+          if let Some(jpeg_exif_ifd) = jpeg_ifd.get_sub_ifd(ExifTag::ExifOffset) {
+            exif.extend_from_ifd(jpeg_exif_ifd)?;
+          }
+        }
+      }
+    }
     if exif.iso_speed.unwrap_or(0) == 0 && exif.iso_speed_ratings.unwrap_or(0) == 0 && exif.recommended_exposure_index.unwrap_or(0) == 0 {
       // Use ISO from PanasonicRaw IFD
       if let Some(iso) = self.tiff.get_entry(PanasonicTag::ISO) {

@@ -44,6 +44,7 @@ pub struct Exif {
   pub light_source: Option<u16>,
   pub flash: Option<u16>,
   pub focal_length: Option<Rational>,
+  pub focal_len_in_35mm_format: Option<u16>,
   pub image_number: Option<u32>,
   pub color_space: Option<u16>,
   pub flash_energy: Option<Rational>,
@@ -64,6 +65,15 @@ pub struct Exif {
   pub custom_rendered: Option<u16>,
   pub digital_zoom_ratio: Option<Rational>,
   pub gain_control: Option<u16>,
+  pub contrast: Option<u16>,
+  pub saturation: Option<u16>,
+  pub sharpness: Option<u16>,
+  pub ambient_temperature: Option<SRational>,
+  pub pressure: Option<Rational>,
+  pub water_depth: Option<SRational>,
+  pub acceleration: Option<Rational>,
+  pub file_source: Option<Vec<u8>>,
+  pub image_description: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -156,6 +166,7 @@ impl Exif {
           (ExifTag::LightSource, Value::Short(data)) => self.light_source = data.get(0).cloned(),
           (ExifTag::Flash, Value::Short(data)) => self.flash = data.get(0).cloned(),
           (ExifTag::FocalLength, Value::Rational(data)) => self.focal_length = data.get(0).cloned(),
+          (ExifTag::FocalLengthIn35mmFormat, Value::Short(data)) => self.focal_len_in_35mm_format = data.get(0).cloned(),
           (ExifTag::ImageNumber, Value::Long(data)) => self.image_number = data.get(0).cloned(),
           (ExifTag::ColorSpace, Value::Short(data)) => self.color_space = data.get(0).cloned(),
           (ExifTag::FlashEnergy, Value::Rational(data)) => self.flash_energy = data.get(0).cloned(),
@@ -165,6 +176,9 @@ impl Exif {
           (ExifTag::SubjectDistanceRange, Value::Short(data)) => self.subject_distance_range = data.get(0).cloned(),
           (ExifTag::OwnerName, Value::Ascii(data)) => self.owner_name = data.strings().get(0).map(trim),
           (ExifTag::SerialNumber, Value::Ascii(data)) => self.serial_number = data.strings().get(0).map(trim),
+          (ExifTag::LensSpecification, Value::Rational(data)) if data.len() == 4 => self.lens_spec = Some([data[0], data[1], data[2], data[3]]),
+          (ExifTag::LensMake, Value::Ascii(data)) => self.lens_make = data.strings().get(0).map(trim),
+          (ExifTag::LensModel, Value::Ascii(data)) => self.lens_model = data.strings().get(0).map(trim),
           (ExifTag::LensSerialNumber, Value::Ascii(data)) => self.lens_serial_number = data.strings().get(0).map(trim),
           (ExifTag::UserComment, Value::Ascii(data)) => self.user_comment = data.strings().get(0).map(trim),
           (ExifTag::MakerNotes, Value::Undefined(data)) => self.makernotes = Some(data.clone()),
@@ -173,6 +187,15 @@ impl Exif {
           (ExifTag::CustomRendered, Value::Short(data)) => self.custom_rendered = data.get(0).cloned(),
           (ExifTag::DigitalZoomRatio, Value::Rational(data)) => self.digital_zoom_ratio = data.get(0).cloned(),
           (ExifTag::GainControl, Value::Short(data)) => self.gain_control = data.get(0).cloned(),
+          (ExifTag::Contrast, Value::Short(data)) => self.contrast = data.get(0).cloned(),
+          (ExifTag::Saturation, Value::Short(data)) => self.saturation = data.get(0).cloned(),
+          (ExifTag::Sharpness, Value::Short(data)) => self.sharpness = data.get(0).cloned(),
+          (ExifTag::AmbientTemperature, Value::SRational(data)) => self.ambient_temperature = data.get(0).cloned(),
+          (ExifTag::Pressure, Value::Rational(data)) => self.pressure = data.get(0).cloned(),
+          (ExifTag::WaterDepth, Value::SRational(data)) => self.water_depth = data.get(0).cloned(),
+          (ExifTag::Acceleration, Value::Rational(data)) => self.acceleration = data.get(0).cloned(),
+          (ExifTag::FileSource, Value::Undefined(data)) => self.file_source = Some(data.clone()),
+          (ExifTag::ImageDescription, Value::Ascii(data)) => self.image_description = data.strings().get(0).map(trim),
           (tag, _value) => {
             log::debug!("Ignoring EXIF tag: {:?}", tag);
           }

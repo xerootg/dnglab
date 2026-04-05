@@ -1110,3 +1110,40 @@ impl RawLoader {
     }
   }
 }
+
+/// Parse JPEG dimensions from SOF marker in raw JPEG data.
+/// Returns (width, height) or (0, 0) if not found.
+pub(crate) fn jpeg_dimensions(data: &[u8]) -> (u32, u32) {
+  let mut i = 0;
+  while i + 1 < data.len() {
+    if data[i] != 0xFF {
+      i += 1;
+      continue;
+    }
+    let marker = data[i + 1];
+    i += 2;
+    if marker == 0xFF || marker == 0x00 {
+      continue;
+    }
+    if marker == 0xD8 || (0xD0..=0xD7).contains(&marker) || marker == 0xD9 {
+      continue;
+    }
+    if i + 2 > data.len() {
+      break;
+    }
+    let len = ((data[i] as usize) << 8) | data[i + 1] as usize;
+    // SOF markers: 0xC0-0xC3, 0xC5-0xC7, 0xC9-0xCB, 0xCD-0xCF
+    if (marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) || (marker >= 0xC9 && marker <= 0xCF) {
+      if i + 7 <= data.len() {
+        let height = ((data[i + 3] as u32) << 8) | data[i + 4] as u32;
+        let width = ((data[i + 5] as u32) << 8) | data[i + 6] as u32;
+        return (width, height);
+      }
+    }
+    if len < 2 || i + len > data.len() {
+      break;
+    }
+    i += len;
+  }
+  (0, 0)
+}
