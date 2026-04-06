@@ -2013,3 +2013,44 @@ make = "Nikon"
 model = "Nikkor 200mm f/4 AiS"
 focal_range = [[200, 1], [200, 1]]
 aperture_range = [[4, 1], [4, 1]]
+
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "00 00 00 00 00 00 E1 12"
+make = "Nikon"
+model = "TC-17E II"
+focal_range = [[0, 1], [0, 1]]
+aperture_range = [[0, 1], [0, 1]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "00 00 00 00 00 00 F1 0C"
+make = "Nikon"
+model = "TC-14E II"
+focal_range = [[0, 1], [0, 1]]
+aperture_range = [[0, 1], [0, 1]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "00 00 00 00 00 00 F2 18"
+make = "Nikon"
+model = "TC-20E II"
+focal_range = [[0, 1], [0, 1]]
+aperture_range = [[0, 1], [0, 1]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "01 00 00 00 00 00 02 00"
+make = "Nikon"
+model = "TC-16A"
+focal_range = [[0, 1], [0, 1]]
+aperture_range = [[0, 1], [0, 1]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "01 00 00 00 00 00 08 00"
+make = "Nikon"
+model = "TC-16A"
+focal_range = [[0, 1], [0, 1]]
+aperture_range = [[0, 1], [0, 1]]

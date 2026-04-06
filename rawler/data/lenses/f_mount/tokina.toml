@@ -325,3 +325,12 @@ make = "Tokina"
 model = "opera 16-28mm F2.8 FF"
 focal_range = [[16, 1], [28, 1]]
 aperture_range = [[28, 10], [28, 10]]
+
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "8D 54 68 68 24 24 87 02"
+make = "Tokina"
+model = "Tokina AT-X PRO 100mm F2.8 D Macro"
+focal_range = [[100, 1], [100, 1]]
+aperture_range = [[14, 5], [14, 5]]

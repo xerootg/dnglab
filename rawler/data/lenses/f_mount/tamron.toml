@@ -645,3 +645,36 @@ make = "Tamron"
 model = "SP AF 200-500mm f/5-6.3 Di (A08)"
 focal_range = [[200, 1], [500, 1]]
 aperture_range = [[5, 1], [63, 10]]
+
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "CE 00 37 5C 25 25 DF 4E"
+make = "Tamron"
+model = "Tamron SP 24-70mm f/2.8 Di VC USD G2 (A032)"
+focal_range = [[24, 1], [70, 1]]
+aperture_range = [[14, 5], [14, 5]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "E0 40 2D 98 2C 41 DF 0E"
+make = "Tamron"
+model = "Tamron 18-400mm f/3.5-6.3 Di II VC HLD (B028)"
+focal_range = [[18, 1], [400, 1]]
+aperture_range = [[7, 2], [63, 10]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "E1 40 19 36 2C 35 DF 0E"
+make = "Tamron"
+model = "Tamron 10-24mm f/3.5-4.5 Di II VC HLD (B023)"
+focal_range = [[10, 1], [24, 1]]
+aperture_range = [[7, 2], [9, 2]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "E3 40 76 A6 38 40 DF 0E"
+make = "Tamron"
+model = "Tamron SP 150-600mm f/5-6.3 Di VC USD G2 (A022)"
+focal_range = [[150, 1], [600, 1]]
+aperture_range = [[5, 1], [63, 10]]

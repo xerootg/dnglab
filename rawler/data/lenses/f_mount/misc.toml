@@ -141,3 +141,20 @@ make = "Rokinon"
 model = "20mm f/1.8 ED AS UMC"
 focal_range = [[20, 1], [20, 1]]
 aperture_range = [[18, 10], [18, 10]]
+
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "9F 4C 44 44 18 18 A1 06"
+make = "Yongnuo"
+model = "Yongnuo YN35mm F2"
+focal_range = [[35, 1], [35, 1]]
+aperture_range = [[2, 1], [2, 1]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "9F 4D 50 50 14 14 A0 06"
+make = "Yongnuo"
+model = "Yongnuo YN50mm F1.8N"
+focal_range = [[50, 1], [50, 1]]
+aperture_range = [[9, 5], [9, 5]]

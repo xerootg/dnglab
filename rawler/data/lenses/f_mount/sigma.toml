@@ -1301,3 +1301,36 @@ make = "Sigma"
 model = "APO 300-800mm F5.6 EX DG HSM"
 focal_range = [[300, 1], [800, 1]]
 aperture_range = [[56, 10], [56, 10]]
+
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "7E 54 37 37 0C 0C 4B 06"
+make = "Sigma"
+model = "Sigma 24mm F1.4 DG HSM | A"
+focal_range = [[24, 1], [24, 1]]
+aperture_range = [[7, 5], [7, 5]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "BC 54 3C 3C 0C 0C 4B 46"
+make = "Sigma"
+model = "Sigma 28mm F1.4 DG HSM | A"
+focal_range = [[28, 1], [28, 1]]
+aperture_range = [[7, 5], [7, 5]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "BD 54 48 48 0C 0C 4B 46"
+make = "Sigma"
+model = "Sigma 40mm F1.4 DG HSM | A"
+focal_range = [[40, 1], [40, 1]]
+aperture_range = [[7, 5], [7, 5]]
+
+[[lenses]]
+mount = "F-mount"
+nikon_id = "BE 54 6A 6A 0C 0C 4B 46"
+make = "Sigma"
+model = "Sigma 105mm F1.4 DG HSM | A"
+focal_range = [[105, 1], [105, 1]]
+aperture_range = [[7, 5], [7, 5]]
