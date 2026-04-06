@@ -254,11 +254,15 @@ impl<'a> Decoder for Rw2Decoder<'a> {
     todo!()
   }
 
-  fn raw_metadata(&self, file: &RawSource, _params: &RawDecodeParams) -> Result<RawMetadata> {
+  fn raw_metadata(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<RawMetadata> {
     let mut exif = Exif::new(self.tiff.root_ifd())?;
     // The PanasonicRaw EXIF sub-IFD only has ~14 basic entries.
     // The full standard EXIF (Contrast, Saturation, ExposureMode, etc.)
     // lives in the embedded JPEG's EXIF structure. Parse it to fill gaps.
+    // Also extract makernote-based metadata (serial numbers, lens type).
+    let mut mn_lens_type = None;
+    let mut mn_serial = None;
+    let mut mn_lens_serial = None;
     if let Some(jpeg_entry) = self.tiff.get_entry(PanasonicTag::JpegData) {
       let jpeg_buf = jpeg_entry.get_data();
       if let Some(exif_start) = jpeg_buf.windows(6).position(|w| w == b"Exif\x00\x00") {
@@ -267,6 +271,11 @@ impl<'a> Decoder for Rw2Decoder<'a> {
           exif.extend_from_ifd(&jpeg_ifd)?;
           if let Some(jpeg_exif_ifd) = jpeg_ifd.get_sub_ifd(ExifTag::ExifOffset) {
             exif.extend_from_ifd(jpeg_exif_ifd)?;
+            // MakerNotes live in the JPEG's ExifIFD, not in the raw IFD.
+            let (lt, sn, ls) = Self::parse_panasonic_makernotes(jpeg_exif_ifd, tiff_data);
+            mn_lens_type = lt;
+            mn_serial = sn;
+            mn_lens_serial = ls;
           }
         }
       }
@@ -277,15 +286,21 @@ impl<'a> Decoder for Rw2Decoder<'a> {
         exif.iso_speed_ratings = Some(iso.force_u16(0));
       }
     }
-    let mdata = RawMetadata::new_with_lens(&self.camera, exif, self.get_lens_description()?.cloned());
+
+    if exif.serial_number.is_none() {
+      exif.serial_number = mn_serial;
+    }
+    if exif.lens_serial_number.is_none() {
+      exif.lens_serial_number = mn_lens_serial;
+    }
+
+    let mut mdata = RawMetadata::new_with_lens(&self.camera, exif, self.get_lens_description()?.cloned());
 
     // If the lens database didn't resolve (older bodies without LensTypeMake/LensTypeModel),
     // fall back to the Panasonic LensType string (tag 0x0051) from makernotes.
     if mdata.exif.lens_model.is_none() {
-      if let Some(lens_type) = self.get_panasonic_lens_type(file) {
-        let mut mdata = mdata;
+      if let Some(lens_type) = mn_lens_type {
         mdata.exif.lens_model = Some(lens_type);
-        return Ok(mdata);
       }
     }
 
@@ -297,8 +312,19 @@ impl<'a> Decoder for Rw2Decoder<'a> {
   }
 
   fn ifd(&self, wk_ifd: WellKnownIFD) -> crate::Result<Option<Rc<IFD>>> {
-    if !matches!(wk_ifd, WellKnownIFD::VirtualDngRawTags) {
-      return Ok(None);
+    match wk_ifd {
+      WellKnownIFD::VirtualDngRootTags => {
+        let mut ifd = IFD::default();
+        // Panasonic MakerNotes use absolute offsets (preceded by 12-byte
+        // "Panasonic\0\0\0" header), so they are safe to copy verbatim.
+        ifd.entries.insert(
+          DngTag::MakerNoteSafety.into(),
+          Entry { tag: DngTag::MakerNoteSafety.into(), value: Value::Short(vec![1]), embedded: None },
+        );
+        return Ok(Some(Rc::new(ifd)));
+      }
+      WellKnownIFD::VirtualDngRawTags => {}
+      _ => return Ok(None),
     }
     let Some(ref dp) = self.dist_params else {
       return Ok(None);
@@ -428,24 +454,71 @@ impl<'a> Rw2Decoder<'a> {
     Ok(None)
   }
 
-  /// Read the Panasonic LensType string (tag 0x0051) from makernotes.
-  /// This is the primary lens identification on older bodies that
-  /// lack the newer LensTypeMake/LensTypeModel numeric IDs (tag 0x1201/0x1202).
-  fn get_panasonic_lens_type(&self, file: &RawSource) -> Option<String> {
-    let exif_ifd = self.tiff.find_first_ifd_with_tag(ExifTag::MakerNotes)?;
-    let mn = exif_ifd
-      .parse_makernote(&mut std::io::Cursor::new(file.buf()), crate::formats::tiff::ifd::OffsetMode::Absolute, &[])
-      .ok()??;
-    if let Some(entry) = mn.get_entry(0x0051_u16) {
+  /// Parse information from Panasonic makernotes.
+  ///
+  /// Returns (lens_type, serial_number, lens_serial_number) extracted from:
+  /// - 0x0025: InternalSerialNumber, e.g. "(X04) 2014:10:28 no. 0019" → "X041410280019"
+  /// - 0x0051: LensType string (primary lens ID on older bodies)
+  /// - 0x0052: LensSerialNumber
+  fn parse_panasonic_makernotes(exif_ifd: &IFD, data: &[u8]) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(mn) = exif_ifd
+      .parse_makernote(&mut std::io::Cursor::new(data), crate::formats::tiff::ifd::OffsetMode::Absolute, &[])
+      .ok()
+      .flatten()
+    else {
+      return (None, None, None);
+    };
+
+    // 0x0051: LensType string
+    let lens_type = mn.get_entry(0x0051_u16).and_then(|entry| {
       if let Value::Ascii(data) = &entry.value {
-        let s = data.strings().into_iter().next()?;
-        let s = s.trim().to_string();
-        if !s.is_empty() {
-          return Some(s);
-        }
+        let s = data.strings().into_iter().next()?.trim().to_string();
+        if !s.is_empty() { Some(s) } else { None }
+      } else {
+        None
       }
-    }
-    None
+    });
+
+    // 0x0025: InternalSerialNumber → camera serial
+    // Format: "(X04) 2014:10:28 no. 0019" → strip to "X041410280019"
+    // Stored as either Ascii or Undefined bytes.
+    let serial_number = mn.get_entry(0x0025_u16).and_then(|entry| {
+      let raw_str = match &entry.value {
+        Value::Ascii(data) => data.strings().into_iter().next().map(|s| s.trim().to_string()),
+        Value::Undefined(data) => {
+          // Treat raw bytes as ASCII, strip trailing NULs
+          let s = String::from_utf8_lossy(data);
+          let trimmed = s.trim_end_matches('\0').trim().to_string();
+          if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+        _ => None,
+      };
+      raw_str.and_then(|s| {
+        if s.is_empty() {
+          return None;
+        }
+        // Remove parentheses, colons, spaces, and " no. " to build compact serial
+        let compact: String = s
+          .replace('(', "")
+          .replace(')', "")
+          .replace(':', "")
+          .replace(" no. ", "")
+          .replace(' ', "");
+        if !compact.is_empty() { Some(compact) } else { None }
+      })
+    });
+
+    // 0x0052: LensSerialNumber
+    let lens_serial = mn.get_entry(0x0052_u16).and_then(|entry| {
+      if let Value::Ascii(data) = &entry.value {
+        let s = data.strings().into_iter().next()?.trim().to_string();
+        if !s.is_empty() { Some(s) } else { None }
+      } else {
+        None
+      }
+    });
+
+    (lens_type, serial_number, lens_serial)
   }
 
   fn get_focal_len(&self) -> Result<Option<Rational>> {
