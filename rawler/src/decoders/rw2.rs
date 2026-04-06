@@ -213,6 +213,24 @@ impl<'a> Decoder for Rw2Decoder<'a> {
     if let Some(cfa) = self.get_cfa()? {
       camera.cfa = cfa;
     }
+
+    // Compute ISO-dependent NoiseProfile if not already set via TOML.
+    // per-camera noise model: variance(x) = S*x + O (normalized),
+    // where S scales linearly with ISO gain and O scales with its square.
+    if camera.noise_profile.is_none() {
+      if let Some(iso_entry) = self.tiff.get_entry(PanasonicTag::ISO) {
+        let iso = iso_entry.force_u32(0) as f64;
+        if iso > 0.0 {
+          const NOISE_S_BASE: f64 = 3.685797665369650e-05;
+          const NOISE_O_BASE: f64 = 6.496027680310430e-09;
+          let gain = iso / 100.0;
+          let s = NOISE_S_BASE * gain;
+          let o = NOISE_O_BASE * gain * gain;
+          camera.noise_profile = Some(vec![s, o]);
+        }
+      }
+    }
+
     let photometric = RawPhotometricInterpretation::Cfa(CFAConfig::new_from_camera(&camera));
     let mut img = RawImage::new(camera, image, cpp, normalize_wb(self.get_wb()?), photometric, blacklevel, None, dummy);
 
