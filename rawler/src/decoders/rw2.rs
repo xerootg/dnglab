@@ -281,6 +281,7 @@ impl<'a> Decoder for Rw2Decoder<'a> {
     let mut mn_lens_type = None;
     let mut mn_serial = None;
     let mut mn_lens_serial = None;
+    let mut mn_utc_timestamp = None;
     if let Some(jpeg_entry) = self.tiff.get_entry(PanasonicTag::JpegData) {
       let jpeg_buf = jpeg_entry.get_data();
       if let Some(exif_start) = jpeg_buf.windows(6).position(|w| w == b"Exif\x00\x00") {
@@ -290,10 +291,11 @@ impl<'a> Decoder for Rw2Decoder<'a> {
           if let Some(jpeg_exif_ifd) = jpeg_ifd.get_sub_ifd(ExifTag::ExifOffset) {
             exif.extend_from_ifd(jpeg_exif_ifd)?;
             // MakerNotes live in the JPEG's ExifIFD, not in the raw IFD.
-            let (lt, sn, ls) = Self::parse_panasonic_makernotes(jpeg_exif_ifd, tiff_data);
+            let (lt, sn, ls, ts) = Self::parse_panasonic_makernotes(jpeg_exif_ifd, tiff_data);
             mn_lens_type = lt;
             mn_serial = sn;
             mn_lens_serial = ls;
+            mn_utc_timestamp = ts;
           }
         }
       }
@@ -310,6 +312,19 @@ impl<'a> Decoder for Rw2Decoder<'a> {
     }
     if exif.lens_serial_number.is_none() {
       exif.lens_serial_number = mn_lens_serial;
+    }
+
+    // Compute OffsetTime from makernote UTC timestamp vs DateTimeOriginal (local).
+    // TimeStamp (0x00af) is UTC; DateTimeOriginal is local time.
+    // Difference = local - UTC = timezone offset.
+    if exif.offset_time.is_none() {
+      if let (Some(utc_str), Some(local_str)) = (&mn_utc_timestamp, &exif.date_time_original) {
+        if let Some(offset) = compute_timezone_offset(local_str, utc_str) {
+          exif.offset_time = Some(offset.clone());
+          exif.offset_time_original = Some(offset.clone());
+          exif.offset_time_digitized = Some(offset);
+        }
+      }
     }
 
     let mut mdata = RawMetadata::new_with_lens(&self.camera, exif, self.get_lens_description()?.cloned());
@@ -341,61 +356,73 @@ impl<'a> Decoder for Rw2Decoder<'a> {
         );
         return Ok(Some(Rc::new(ifd)));
       }
-      WellKnownIFD::VirtualDngRawTags => {}
+      WellKnownIFD::VirtualDngRawTags => {
+        let mut ifd = IFD::default();
+
+        ifd.entries.insert(
+          DngTag::BayerGreenSplit.into(),
+          Entry { tag: DngTag::BayerGreenSplit.into(), value: Value::Long(vec![250]), embedded: None },
+        );
+        ifd.entries.insert(
+          DngTag::AntiAliasStrength.into(),
+          Entry {
+            tag: DngTag::AntiAliasStrength.into(),
+            value: Value::Rational(vec![Rational::new(1, 1)]),
+            embedded: None,
+          },
+        );
+
+        // Add WarpRectilinear distortion correction if available.
+        if let Some(ref dp) = self.dist_params {
+          let w = self.tiff.get_entry(PanasonicTag::PanaWidth).map(|e| e.force_usize(0)).unwrap_or(0);
+          let h = self.tiff.get_entry(PanasonicTag::PanaLength).map(|e| e.force_usize(0)).unwrap_or(0);
+          if w > 0 && h > 0 {
+            // m = half-diagonal of the full sensor image in pixels
+            let m = ((w * w + h * h) as f64).sqrt() / 2.0;
+            let ratio = m / dp.n;
+            let ratio2 = ratio * ratio;
+
+            // Convert Panasonic polynomial to DNG WarpRectilinear coefficients.
+            //
+            // Panasonic: Ru = scale * (Rd + a·Rd³ + b·Rd⁵ + c·Rd⁷)    (r normalised to N)
+            // DNG:       Ru = (kr0·Rd + kr1·Rd³ + kr2·Rd⁵ + kr3·Rd⁷)   (r normalised to m)
+            //
+            // Substituting Rd_pan = Rd_dng · (m/N) and solving:
+            //   kr0 = scale
+            //   kr1 = scale · a · (m/N)²
+            //   kr2 = scale · b · (m/N)⁴
+            //   kr3 = scale · c · (m/N)⁶
+            let kr0 = dp.scale;
+            let kr1 = dp.scale * dp.a * ratio2;
+            let kr2 = dp.scale * dp.b * ratio2 * ratio2;
+            let kr3 = dp.scale * dp.c * ratio2 * ratio2 * ratio2;
+
+            log::debug!(
+              "RW2 WarpRectilinear: kr0={:.6} kr1={:.6} kr2={:.6} kr3={:.6} (m={:.1} N={:.1})",
+              kr0,
+              kr1,
+              kr2,
+              kr3,
+              m,
+              dp.n
+            );
+
+            let kr = [[kr0, kr1, kr2, kr3]];
+            let kt = [[0.0_f64, 0.0_f64]];
+            let opcode = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+            let opcode_list3 = opcodes::encode_opcode_list(&[opcode]);
+
+            ifd.entries.insert(
+              DngTag::OpcodeList3.into(),
+              Entry { tag: DngTag::OpcodeList3.into(), value: Value::Undefined(opcode_list3), embedded: None },
+            );
+          }
+        }
+
+        return Ok(Some(Rc::new(ifd)));
+      }
       _ => return Ok(None),
     }
-    let Some(ref dp) = self.dist_params else {
-      return Ok(None);
-    };
-
-    // Full sensor dimensions are needed to convert from Panasonic's DistortionN
-    // normalisation to DNG's half-diagonal normalisation.
-    let w = self.tiff.get_entry(PanasonicTag::PanaWidth).map(|e| e.force_usize(0)).unwrap_or(0);
-    let h = self.tiff.get_entry(PanasonicTag::PanaLength).map(|e| e.force_usize(0)).unwrap_or(0);
-    if w == 0 || h == 0 {
-      return Ok(None);
-    }
-    // m = half-diagonal of the full sensor image in pixels
-    let m = ((w * w + h * h) as f64).sqrt() / 2.0;
-    let ratio = m / dp.n;
-    let ratio2 = ratio * ratio;
-
-    // Convert Panasonic polynomial to DNG WarpRectilinear coefficients.
-    //
-    // Panasonic: Ru = scale * (Rd + a·Rd³ + b·Rd⁵ + c·Rd⁷)    (r normalised to N)
-    // DNG:       Ru = (kr0·Rd + kr1·Rd³ + kr2·Rd⁵ + kr3·Rd⁷)   (r normalised to m)
-    //
-    // Substituting Rd_pan = Rd_dng · (m/N) and solving:
-    //   kr0 = scale
-    //   kr1 = scale · a · (m/N)²
-    //   kr2 = scale · b · (m/N)⁴
-    //   kr3 = scale · c · (m/N)⁶
-    let kr0 = dp.scale;
-    let kr1 = dp.scale * dp.a * ratio2;
-    let kr2 = dp.scale * dp.b * ratio2 * ratio2;
-    let kr3 = dp.scale * dp.c * ratio2 * ratio2 * ratio2;
-
-    log::debug!(
-      "RW2 WarpRectilinear: kr0={:.6} kr1={:.6} kr2={:.6} kr3={:.6} (m={:.1} N={:.1})",
-      kr0,
-      kr1,
-      kr2,
-      kr3,
-      m,
-      dp.n
-    );
-
-    let kr = [[kr0, kr1, kr2, kr3]];
-    let kt = [[0.0_f64, 0.0_f64]];
-    let opcode = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
-    let opcode_list3 = opcodes::encode_opcode_list(&[opcode]);
-
-    let mut ifd = IFD::default();
-    ifd.entries.insert(
-      DngTag::OpcodeList3.into(),
-      Entry { tag: DngTag::OpcodeList3.into(), value: Value::Undefined(opcode_list3), embedded: None },
-    );
-    Ok(Some(Rc::new(ifd)))
   }
 }
 
@@ -474,17 +501,18 @@ impl<'a> Rw2Decoder<'a> {
 
   /// Parse information from Panasonic makernotes.
   ///
-  /// Returns (lens_type, serial_number, lens_serial_number) extracted from:
+  /// Returns (lens_type, serial_number, lens_serial_number, utc_timestamp) extracted from:
   /// - 0x0025: InternalSerialNumber, e.g. "(X04) 2014:10:28 no. 0019" → "X041410280019"
   /// - 0x0051: LensType string (primary lens ID on older bodies)
   /// - 0x0052: LensSerialNumber
-  fn parse_panasonic_makernotes(exif_ifd: &IFD, data: &[u8]) -> (Option<String>, Option<String>, Option<String>) {
+  /// - 0x00af: TimeStamp (UTC), format "YYYY:MM:DD HH:MM:SS"
+  fn parse_panasonic_makernotes(exif_ifd: &IFD, data: &[u8]) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
     let Some(mn) = exif_ifd
       .parse_makernote(&mut std::io::Cursor::new(data), crate::formats::tiff::ifd::OffsetMode::Absolute, &[])
       .ok()
       .flatten()
     else {
-      return (None, None, None);
+      return (None, None, None, None);
     };
 
     // 0x0051: LensType string
@@ -536,7 +564,21 @@ impl<'a> Rw2Decoder<'a> {
       }
     });
 
-    (lens_type, serial_number, lens_serial)
+    // 0x00af: TimeStamp (UTC) — format "YYYY:MM:DD HH:MM:SS"
+    let utc_timestamp = mn.get_entry(0x00af_u16).and_then(|entry| {
+      let s = match &entry.value {
+        Value::Ascii(data) => data.strings().into_iter().next().map(|s| s.trim().to_string()),
+        Value::Undefined(data) => {
+          let s = String::from_utf8_lossy(data);
+          let trimmed = s.trim_end_matches('\0').trim().to_string();
+          if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+        _ => None,
+      };
+      s.filter(|ts| ts.len() >= 19)
+    });
+
+    (lens_type, serial_number, lens_serial, utc_timestamp)
   }
 
   fn get_focal_len(&self) -> Result<Option<Rational>> {
@@ -615,6 +657,49 @@ fn normalize_wb(raw_wb: [f32; 4]) -> [f32; 4] {
     }
   });
   [norm[0], (norm[1] + norm[2]) / 2.0, norm[3], f32::NAN]
+}
+
+/// Compute timezone offset string (e.g. "+09:00", "-06:00") from local and UTC
+/// datetime strings in "YYYY:MM:DD HH:MM:SS" format.
+fn compute_timezone_offset(local_str: &str, utc_str: &str) -> Option<String> {
+  // Parse "YYYY:MM:DD HH:MM:SS" into (year, month, day, hour, min, sec)
+  fn parse_dt(s: &str) -> Option<(i64, i64, i64, i64, i64, i64)> {
+    let parts: Vec<&str> = s.splitn(2, ' ').collect();
+    if parts.len() != 2 {
+      return None;
+    }
+    let date: Vec<i64> = parts[0].split(':').filter_map(|p| p.parse().ok()).collect();
+    let time: Vec<i64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
+    if date.len() == 3 && time.len() == 3 {
+      Some((date[0], date[1], date[2], time[0], time[1], time[2]))
+    } else {
+      None
+    }
+  }
+
+  // Convert to a simple minutes-since-epoch approximation (good enough for offset)
+  fn to_minutes(y: i64, mo: i64, d: i64, h: i64, mi: i64, _s: i64) -> i64 {
+    // Approximate: treat each month as 30 days, each year as 365 days
+    (y * 365 + mo * 30 + d) * 24 * 60 + h * 60 + mi
+  }
+
+  let (ly, lmo, ld, lh, lmi, ls) = parse_dt(local_str)?;
+  let (uy, umo, ud, uh, umi, us) = parse_dt(utc_str)?;
+
+  let local_min = to_minutes(ly, lmo, ld, lh, lmi, ls);
+  let utc_min = to_minutes(uy, umo, ud, uh, umi, us);
+  let diff = local_min - utc_min;
+
+  // Sanity check: offset should be between -14 and +14 hours
+  if diff.abs() > 14 * 60 {
+    return None;
+  }
+
+  let sign = if diff >= 0 { '+' } else { '-' };
+  let abs_diff = diff.abs();
+  let hours = abs_diff / 60;
+  let minutes = abs_diff % 60;
+  Some(format!("{}{:02}:{:02}", sign, hours, minutes))
 }
 
 tiff_tag_enum!(PanasonicTag);
