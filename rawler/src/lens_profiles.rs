@@ -100,15 +100,16 @@ fn generate_opcodes(
   // Convert Adobe coefficients to DNG WarpRectilinear coordinate space.
   //
   // Adobe normalizes r by (width * FocalLengthX).
-  // DNG WarpRectilinear normalizes r by max(width, height).
+  // DNG WarpRectilinear normalizes r by the half-diagonal:
+  //   halfDiag = sqrt(width² + height²) / 2
+  // (see DNG SDK dng_lens_correction.h, MaxDistancePointToRect)
   //
   // For the polynomial 1 + k1*r² + k2*r⁴ + k3*r⁶:
-  //   r_dng = r_adobe * (width * flx) / max(width, height)
-  //
-  // For landscape images (width >= height): ratio = flx
-  // For portrait images: ratio = width * flx / height
-  let max_dim = dng_width.max(dng_height) as f64;
-  let ratio = (dng_width as f64 * dist_point.flx) / max_dim;
+  //   r_dng = r_adobe * (width * flx) / halfDiag
+  let w = dng_width as f64;
+  let h = dng_height as f64;
+  let half_diag = (w * w + h * h).sqrt() / 2.0;
+  let ratio = (w * dist_point.flx) / half_diag;
 
   let kr1 = dist_point.k1 * ratio * ratio;
   let kr2 = dist_point.k2 * ratio.powi(4);
