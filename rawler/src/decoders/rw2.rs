@@ -254,7 +254,7 @@ impl<'a> Decoder for Rw2Decoder<'a> {
     todo!()
   }
 
-  fn raw_metadata(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<RawMetadata> {
+  fn raw_metadata(&self, file: &RawSource, _params: &RawDecodeParams) -> Result<RawMetadata> {
     let mut exif = Exif::new(self.tiff.root_ifd())?;
     // The PanasonicRaw EXIF sub-IFD only has ~14 basic entries.
     // The full standard EXIF (Contrast, Saturation, ExposureMode, etc.)
@@ -278,6 +278,17 @@ impl<'a> Decoder for Rw2Decoder<'a> {
       }
     }
     let mdata = RawMetadata::new_with_lens(&self.camera, exif, self.get_lens_description()?.cloned());
+
+    // If the lens database didn't resolve (older bodies without LensTypeMake/LensTypeModel),
+    // fall back to the Panasonic LensType string (tag 0x0051) from makernotes.
+    if mdata.exif.lens_model.is_none() {
+      if let Some(lens_type) = self.get_panasonic_lens_type(file) {
+        let mut mdata = mdata;
+        mdata.exif.lens_model = Some(lens_type);
+        return Ok(mdata);
+      }
+    }
+
     Ok(mdata)
   }
 
@@ -333,12 +344,12 @@ impl<'a> Decoder for Rw2Decoder<'a> {
     let kr = [[kr0, kr1, kr2, kr3]];
     let kt = [[0.0_f64, 0.0_f64]];
     let opcode = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
-    let opcode_list2 = opcodes::encode_opcode_list(&[opcode]);
+    let opcode_list3 = opcodes::encode_opcode_list(&[opcode]);
 
     let mut ifd = IFD::default();
     ifd.entries.insert(
-      DngTag::OpcodeList2.into(),
-      Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(opcode_list2), embedded: None },
+      DngTag::OpcodeList3.into(),
+      Entry { tag: DngTag::OpcodeList3.into(), value: Value::Undefined(opcode_list3), embedded: None },
     );
     Ok(Some(Rc::new(ifd)))
   }
@@ -415,6 +426,26 @@ impl<'a> Rw2Decoder<'a> {
     }
     log::warn!("No lens data available");
     Ok(None)
+  }
+
+  /// Read the Panasonic LensType string (tag 0x0051) from makernotes.
+  /// This is the primary lens identification on older bodies that
+  /// lack the newer LensTypeMake/LensTypeModel numeric IDs (tag 0x1201/0x1202).
+  fn get_panasonic_lens_type(&self, file: &RawSource) -> Option<String> {
+    let exif_ifd = self.tiff.find_first_ifd_with_tag(ExifTag::MakerNotes)?;
+    let mn = exif_ifd
+      .parse_makernote(&mut std::io::Cursor::new(file.buf()), crate::formats::tiff::ifd::OffsetMode::Absolute, &[])
+      .ok()??;
+    if let Some(entry) = mn.get_entry(0x0051_u16) {
+      if let Value::Ascii(data) = &entry.value {
+        let s = data.strings().into_iter().next()?;
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+          return Some(s);
+        }
+      }
+    }
+    None
   }
 
   fn get_focal_len(&self) -> Result<Option<Rational>> {

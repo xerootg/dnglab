@@ -585,6 +585,11 @@ impl IFD {
             off += 8;
           }
 
+          // Panasonic starts the makernote with "Panasonic\0\0\0"
+          if data.len() >= 12 && data[0..9] == b"Panasonic"[..] {
+            off += 12;
+          }
+
           // Fujifilm has 12 extra bytes
           if data[0..8] == b"FUJIFILM"[..] {
             off += 12;

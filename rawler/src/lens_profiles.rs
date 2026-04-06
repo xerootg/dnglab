@@ -53,7 +53,7 @@ pub struct LensProfile {
 /// Contains DNG-ready opcode coefficients.
 pub struct LensOpcodes {
   pub opcode_list1: Vec<u8>,
-  pub opcode_list2: Vec<u8>,
+  pub opcode_list3: Vec<u8>,
 }
 
 /// Look up a lens profile by name and generate DNG opcodes for the given
@@ -100,16 +100,21 @@ fn generate_opcodes(
   // Convert Adobe coefficients to DNG WarpRectilinear coordinate space.
   //
   // Adobe normalizes r by (width * FocalLengthX).
-  // DNG WarpRectilinear normalizes r by the half-diagonal:
-  //   halfDiag = sqrt(width² + height²) / 2
+  // DNG WarpRectilinear normalizes r by MaxDistancePointToRect(center, imageRect):
+  //   maxDist = sqrt(max(cx, 1-cx)² * W² + max(cy, 1-cy)² * H²)
+  // which equals the half-diagonal only when center is at (0.5, 0.5).
   // (see DNG SDK dng_lens_correction.h, MaxDistancePointToRect)
   //
   // For the polynomial 1 + k1*r² + k2*r⁴ + k3*r⁶:
-  //   r_dng = r_adobe * (width * flx) / halfDiag
+  //   r_dng = r_adobe * (width * flx) / maxDist
   let w = dng_width as f64;
   let h = dng_height as f64;
-  let half_diag = (w * w + h * h).sqrt() / 2.0;
-  let ratio = (w * dist_point.flx) / half_diag;
+  let cx_px = dist_point.cx * w;
+  let cy_px = dist_point.cy * h;
+  let dcx = cx_px.max(w - cx_px);
+  let dcy = cy_px.max(h - cy_px);
+  let max_dist = (dcx * dcx + dcy * dcy).sqrt();
+  let ratio = (w * dist_point.flx) / max_dist;
 
   let kr1 = dist_point.k1 * ratio * ratio;
   let kr2 = dist_point.k2 * ratio.powi(4);
@@ -123,25 +128,29 @@ fn generate_opcodes(
   let kr = [[1.0_f64, kr1, kr2, kr3]];
   let kt = [[0.0_f64, 0.0_f64]];
   let warp_opcode = opcodes::encode_warp_rectilinear(&kr, &kt, dist_point.cx, dist_point.cy, opcodes::FLAG_OPTIONAL);
-  let opcode_list2 = opcodes::encode_opcode_list(&[warp_opcode]);
+  let opcode_list3 = opcodes::encode_opcode_list(&[warp_opcode]);
 
   // Vignetting correction
   let opcode_list1 = if let Some(vig_point) = find_vignette_point(&profile.calibration, focal_mm, aperture) {
     // Vignette model uses the same coordinate conversion.
-    // FixVignetteRadial normalizes r to 1.0 at the image corner (half-diagonal).
+    // FixVignetteRadial normalizes r by MaxDistancePointToRect(center, imageRect).
     // Adobe's vignette model also uses FocalLengthX normalization.
     //
     // Adobe vignette radius: r_adobe = dist_from_center / (width * flx)
-    // DNG vignette radius:   r_dng = dist_from_center / half_diag
-    //   where half_diag = sqrt(w² + h²) / 2
+    // DNG vignette radius:   r_dng = dist_from_center / maxDist
+    //   where maxDist = sqrt(max(cx,1-cx)²·W² + max(cy,1-cy)²·H²)
     //
-    // r_dng = r_adobe * (width * flx) / half_diag
-    // ratio_vig = (width * flx) / half_diag
+    // r_dng = r_adobe * (width * flx) / maxDist
+    // ratio_vig = (width * flx) / maxDist
     let w = dng_width as f64;
     let h = dng_height as f64;
-    let half_diag = (w * w + h * h).sqrt() / 2.0;
     let vig_flx = vig_point.flx;
-    let vig_ratio = (w * vig_flx) / half_diag;
+    let vig_cx_px = vig_point.cx * w;
+    let vig_cy_px = vig_point.cy * h;
+    let vig_dcx = vig_cx_px.max(w - vig_cx_px);
+    let vig_dcy = vig_cy_px.max(h - vig_cy_px);
+    let vig_max_dist = (vig_dcx * vig_dcx + vig_dcy * vig_dcy).sqrt();
+    let vig_ratio = (w * vig_flx) / vig_max_dist;
 
     let vk0 = vig_point.v1.unwrap_or(0.0) * vig_ratio.powi(2);
     let vk1 = vig_point.v2.unwrap_or(0.0) * vig_ratio.powi(4);
@@ -158,7 +167,7 @@ fn generate_opcodes(
     Vec::new()
   };
 
-  Some(LensOpcodes { opcode_list1, opcode_list2 })
+  Some(LensOpcodes { opcode_list1, opcode_list3 })
 }
 
 /// Find the best calibration point by interpolating between the two closest

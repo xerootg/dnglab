@@ -153,8 +153,8 @@ pub struct NefDecoder<'a> {
   /// Pre-computed OpcodeList1 blob (vignette correction, applied before demosaicing).
   /// Empty when no NikonNEFInfo lens correction data is found.
   opcode_list1: Vec<u8>,
-  /// Pre-computed OpcodeList2 blob (distortion correction, applied after demosaicing).
-  opcode_list2: Vec<u8>,
+  /// Pre-computed OpcodeList3 blob (distortion correction, applied after demosaicing).
+  opcode_list3: Vec<u8>,
 }
 
 impl<'a> NefDecoder<'a> {
@@ -180,7 +180,7 @@ impl<'a> NefDecoder<'a> {
     //makernote.dump::<ExifTag>(0).iter().for_each(|line| eprintln!("DUMP: {}", line));
 
     // Parse NikonNEFInfo tag 0xc7d5 from the raw IFD for lens correction opcodes.
-    let (opcode_list1, opcode_list2) = {
+    let (opcode_list1, opcode_list3) = {
       let raw2 = tiff
         .find_first_ifd_with_tag(TiffCommonTag::CFAPattern)
         .or_else(|| tiff.find_ifd_with_new_subfile_type(0));
@@ -202,7 +202,7 @@ impl<'a> NefDecoder<'a> {
       makernote,
       camera,
       opcode_list1,
-      opcode_list2,
+      opcode_list3,
     })
   }
 }
@@ -535,15 +535,15 @@ impl<'a> Decoder for NefDecoder<'a> {
         Ok(Some(Rc::new(ifd)))
       }
       WellKnownIFD::VirtualDngRawTags => {
-        let (opc1, opc2) = if !self.opcode_list1.is_empty() || !self.opcode_list2.is_empty() {
+        let (opc1, opc3) = if !self.opcode_list1.is_empty() || !self.opcode_list3.is_empty() {
           // Use embedded Nikon correction data (tag 0xc7d5)
-          (self.opcode_list1.clone(), self.opcode_list2.clone())
+          (self.opcode_list1.clone(), self.opcode_list3.clone())
         } else {
           // Fall back to Adobe LCP lens correction profile
           self.lcp_fallback_opcodes()
         };
 
-        if opc1.is_empty() && opc2.is_empty() {
+        if opc1.is_empty() && opc3.is_empty() {
           return Ok(None);
         }
         let mut ifd = IFD::default();
@@ -553,10 +553,10 @@ impl<'a> Decoder for NefDecoder<'a> {
             Entry { tag: DngTag::OpcodeList1.into(), value: Value::Undefined(opc1), embedded: None },
           );
         }
-        if !opc2.is_empty() {
+        if !opc3.is_empty() {
           ifd.entries.insert(
-            DngTag::OpcodeList2.into(),
-            Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(opc2), embedded: None },
+            DngTag::OpcodeList3.into(),
+            Entry { tag: DngTag::OpcodeList3.into(), value: Value::Undefined(opc3), embedded: None },
           );
         }
         Ok(Some(Rc::new(ifd)))
@@ -689,7 +689,7 @@ impl<'a> NefDecoder<'a> {
     match crate::lens_profiles::lookup_lens_opcodes(&lens.lens_name, focal_mm, aperture, width, height) {
       Some(opcodes) => {
         log::info!("Using Adobe LCP correction for '{}'", lens.lens_name);
-        (opcodes.opcode_list1, opcodes.opcode_list2)
+        (opcodes.opcode_list1, opcodes.opcode_list3)
       }
       None => Default::default(),
     }
@@ -1049,7 +1049,7 @@ impl<'a> NefDecoder<'a> {
 }
 
 /// Parse the NikonNEFInfo blob (tag 0xc7d5 in the raw SubIFD of Z-series NEF files)
-/// and build OpcodeList1 (vignette) and OpcodeList2 (distortion) blobs.
+/// and build OpcodeList1 (vignette) and OpcodeList3 (distortion) blobs.
 ///
 /// NikonNEFInfo layout:
 ///   bytes  0- 5:  "Nikon\0"
@@ -1131,13 +1131,13 @@ fn parse_nikon_nef_opcodes(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     }
   }
 
-  let opcode_list2 = dist_blob.and_then(build_warp_rectilinear_opcode).unwrap_or_default();
+  let opcode_list3 = dist_blob.and_then(build_warp_rectilinear_opcode).unwrap_or_default();
   let opcode_list1 = vig_blob.and_then(build_fix_vignette_opcode).unwrap_or_default();
 
-  if opcode_list1.is_empty() && opcode_list2.is_empty() {
+  if opcode_list1.is_empty() && opcode_list3.is_empty() {
     return None;
   }
-  Some((opcode_list1, opcode_list2))
+  Some((opcode_list1, opcode_list3))
 }
 
 /// Read a `rational64s` (pair of i32 LE) from a blob at byte offset `off`.
