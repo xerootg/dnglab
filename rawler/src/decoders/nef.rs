@@ -15,6 +15,7 @@ use crate::analyze::FormatDump;
 use crate::bits::BEu16;
 use crate::bits::BEu32;
 use crate::bits::Endian;
+use crate::bits::LEu16;
 use crate::bits::LEu32;
 use crate::bits::LookupTable;
 use crate::bits::clampbits;
@@ -60,6 +61,8 @@ use super::WellKnownIFD;
 
 mod decrypt;
 pub mod lensdata;
+mod noisecal;
+pub mod shotinfo;
 
 const NIKON_F_MOUNT: &str = "F-mount";
 const NIKON_Z_MOUNT: &str = "Z-mount";
@@ -342,6 +345,22 @@ impl<'a> Decoder for NefDecoder<'a> {
       img.whitelevel = WhiteLevel::new(vec![65535; cpp]);
     }
 
+    // Compute per-ISO noise profile if no static one is defined in the camera TOML
+    if img.camera.noise_profile.is_none() {
+      let iso = self
+        .tiff
+        .root_ifd()
+        .get_sub_ifd(ExifTag::ExifOffset)
+        .and_then(|exif_ifd| exif_ifd.get_entry(ExifTag::ISOSpeedRatings))
+        .map(|e| e.force_u32(0));
+      if let Some(iso) = iso {
+        if let Some(np) = noisecal::noise_profile_for_iso(&self.camera.model, iso) {
+          debug!("Computed NoiseProfile for ISO {}: {:?}", iso, np);
+          img.camera.noise_profile = Some(np);
+        }
+      }
+    }
+
     Ok(img)
   }
 
@@ -351,6 +370,16 @@ impl<'a> Decoder for NefDecoder<'a> {
 
   fn raw_metadata(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<RawMetadata> {
     let exif = Exif::new(self.tiff.root_ifd())?;
+    if let Ok(Some(shot_info)) = self.shot_info() {
+      let ori = &shot_info.orientation;
+      log::debug!(
+        "NEF ShotInfo: firmware={}, roll={:.1}, pitch={:.1}, yaw={:.1}",
+        shot_info.header.firmware_version,
+        ori.roll_angle,
+        ori.pitch_angle,
+        ori.yaw_angle,
+      );
+    }
     Ok(match self.get_lens_description() {
       Ok(lens_data) => RawMetadata::new_with_lens(&self.camera, exif, lens_data.cloned()),
       Err(err) => {
@@ -560,6 +589,14 @@ impl<'a> NefDecoder<'a> {
   }
 
   /// Get lens description by analyzing TIFF tags and makernotes
+  /// Decrypt and parse the Nikon ShotInfo tag (0x0091).
+  ///
+  /// Returns `None` if the tag is absent or the version is not supported.
+  /// Currently handles version "0808" (Nikon Zf) and "0803" (Z7 II / Z6 II).
+  pub fn shot_info(&self) -> Result<Option<shotinfo::NefShotInfoZ7II>> {
+    shotinfo::parse_shot_info(&self.makernote)
+  }
+
   fn get_lens_description(&self) -> Result<Option<&'static LensDescription>> {
     if let Some(lensdata) = lensdata::from_makernote(&self.makernote)? {
       if let Some(lenstype) = self.makernote.get_entry(NikonMakernote::LensType) {
@@ -633,6 +670,20 @@ impl<'a> NefDecoder<'a> {
           BEu16(buf, 11 * 2) as f32,
           BEu16(buf, 12 * 2) as f32,
         ]),
+        0x803 => {
+          let data = levels.get_data();
+          let green = LEu16(data, 56) as f32;
+          if green == 0.0 {
+            Err(RawlerError::unsupported(&self.camera, "NEF: 0x0803 WB block has zero green reference".to_string()))
+          } else {
+            Ok([
+              LEu16(data, 44) as f32 / green,
+              1.0,
+              1.0,
+              LEu16(data, 46) as f32 / green,
+            ])
+          }
+        }
         0x204 | 0x205 => {
           let serial = fetch_tiff_tag!(self.makernote, TiffCommonTag::NefSerial);
           let data = serial.get_data();
