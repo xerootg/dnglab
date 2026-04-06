@@ -13,6 +13,7 @@ use rustc_version::{Version, version};
 fn main() {
   join_cameras();
   join_lenses();
+  join_lens_profiles();
 }
 
 fn join_cameras() {
@@ -69,5 +70,28 @@ fn join_lenses() {
   // Check for a minimum version
   if version().expect("version failed") < Version::parse("1.31.0").expect("version parse failed") {
     println!("cargo:rustc-cfg=needs_chunks_exact");
+  }
+}
+
+fn join_lens_profiles() {
+  let out_dir = env::var("OUT_DIR").expect("Missing ENV OUT_DIR");
+  let dest_path = Path::new(&out_dir).join("lens_profiles.toml");
+  let mut out = File::create(dest_path).expect("Unable to create output file");
+
+  for entry in glob("./data/lens_profiles/**/*.toml").expect("Failed to read glob pattern") {
+    let path = entry.expect("Invalid glob entry");
+    let mut f = File::open(&path).expect("failed to open lens profile file");
+    let mut toml = String::new();
+    f.read_to_string(&mut toml).expect("Failed to read lens profile file");
+
+    {
+      match toml.parse::<Value>() {
+        Ok(_) => {}
+        Err(e) => panic!("Error parsing {:?}: {:?}", path, e),
+      };
+    }
+
+    out.write_all(&toml.into_bytes()).expect("Failed to write");
+    out.write_all(b"\n").expect("Failed to write");
   }
 }

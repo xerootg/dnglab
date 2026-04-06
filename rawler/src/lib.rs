@@ -85,6 +85,7 @@ pub mod exif;
 pub mod formats;
 pub mod imgop;
 pub mod lens;
+pub mod lens_profiles;
 pub mod ljpeg92;
 pub mod pixarray;
 pub mod pumps;

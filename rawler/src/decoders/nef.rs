@@ -535,20 +535,28 @@ impl<'a> Decoder for NefDecoder<'a> {
         Ok(Some(Rc::new(ifd)))
       }
       WellKnownIFD::VirtualDngRawTags => {
-        if self.opcode_list1.is_empty() && self.opcode_list2.is_empty() {
+        let (opc1, opc2) = if !self.opcode_list1.is_empty() || !self.opcode_list2.is_empty() {
+          // Use embedded Nikon correction data (tag 0xc7d5)
+          (self.opcode_list1.clone(), self.opcode_list2.clone())
+        } else {
+          // Fall back to Adobe LCP lens correction profile
+          self.lcp_fallback_opcodes()
+        };
+
+        if opc1.is_empty() && opc2.is_empty() {
           return Ok(None);
         }
         let mut ifd = IFD::default();
-        if !self.opcode_list1.is_empty() {
+        if !opc1.is_empty() {
           ifd.entries.insert(
             DngTag::OpcodeList1.into(),
-            Entry { tag: DngTag::OpcodeList1.into(), value: Value::Undefined(self.opcode_list1.clone()), embedded: None },
+            Entry { tag: DngTag::OpcodeList1.into(), value: Value::Undefined(opc1), embedded: None },
           );
         }
-        if !self.opcode_list2.is_empty() {
+        if !opc2.is_empty() {
           ifd.entries.insert(
             DngTag::OpcodeList2.into(),
-            Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(self.opcode_list2.clone()), embedded: None },
+            Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(opc2), embedded: None },
           );
         }
         Ok(Some(Rc::new(ifd)))
@@ -621,6 +629,70 @@ impl<'a> NefDecoder<'a> {
       }
     }
     Ok(None)
+  }
+
+  /// Fall back to Adobe LCP lens correction profiles when embedded Nikon
+  /// correction data (tag 0xc7d5) is absent.
+  fn lcp_fallback_opcodes(&self) -> (Vec<u8>, Vec<u8>) {
+    let lens = match self.get_lens_description() {
+      Ok(Some(l)) => l,
+      _ => return Default::default(),
+    };
+
+    // Get focal length and aperture from EXIF
+    let exif_ifd = self.tiff.root_ifd().get_sub_ifd(ExifTag::ExifOffset);
+    let focal_mm = exif_ifd
+      .as_ref()
+      .and_then(|ifd| ifd.get_entry(ExifTag::FocalLength))
+      .and_then(|e| match &e.value {
+        Value::Rational(r) => r.first().map(|r| r.as_f32() as f64),
+        _ => None,
+      })
+      .unwrap_or(0.0);
+
+    let aperture = exif_ifd
+      .as_ref()
+      .and_then(|ifd| ifd.get_entry(ExifTag::FNumber))
+      .and_then(|e| match &e.value {
+        Value::Rational(r) => r.first().map(|r| r.as_f32() as f64),
+        _ => None,
+      })
+      .unwrap_or(0.0);
+
+    if focal_mm <= 0.0 {
+      return Default::default();
+    }
+
+    // Get image dimensions from the raw IFD
+    let raw_ifd = self
+      .tiff
+      .find_first_ifd_with_tag(TiffCommonTag::CFAPattern)
+      .or_else(|| self.tiff.find_ifd_with_new_subfile_type(0));
+    let (width, height) = match raw_ifd {
+      Some(ifd) => {
+        let w = ifd.get_entry(TiffCommonTag::ImageWidth).map(|e| e.force_u32(0)).unwrap_or(0);
+        let h = ifd.get_entry(TiffCommonTag::ImageLength).map(|e| e.force_u32(0)).unwrap_or(0);
+        (w, h)
+      }
+      None => return Default::default(),
+    };
+
+    if width == 0 || height == 0 {
+      return Default::default();
+    }
+
+    log::debug!(
+      "LCP fallback: lens='{}', focal={:.1}mm, f/{:.1}, {}x{}",
+      lens.lens_name, focal_mm, aperture, width, height
+    );
+
+    match crate::lens_profiles::lookup_lens_opcodes(&lens.lens_name, focal_mm, aperture, width, height) {
+      Some(opcodes) => {
+        log::info!("Using Adobe LCP correction for '{}'", lens.lens_name);
+        (opcodes.opcode_list1, opcodes.opcode_list2)
+      }
+      None => Default::default(),
+    }
   }
 
   fn get_wb(&self) -> Result<[f32; 4]> {
