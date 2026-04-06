@@ -634,7 +634,7 @@ fn wbcoeff_to_tiff_value(rawimage: &RawImage) -> Vec<Rational> {
 }
 
 fn matrix_to_tiff_value(xyz_to_cam: &[f32], d: i32) -> Vec<SRational> {
-  xyz_to_cam.iter().map(|a| SRational::new((a * d as f32) as i32, d)).collect()
+  xyz_to_cam.iter().map(|a| SRational::new((a * d as f32).round() as i32, d)).collect()
 }
 
 /// Compress RAW image with LJPEG-92
