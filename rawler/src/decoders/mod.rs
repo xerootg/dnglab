@@ -360,6 +360,16 @@ pub trait Decoder: Send {
     Ok(None)
   }
 
+  /// Returns a hint for the active picture style the camera was set to when
+  /// this file was captured (e.g. `"standard"`, `"vivid"`, `"monochrome"`).
+  ///
+  /// Used by the DCP profile selector to prefer the matching camera profile
+  /// over the generic "Standard" fallback.  Returns `None` when unknown or
+  /// not available for this format.
+  fn picture_style_hint(&self) -> Option<String> {
+    None
+  }
+
   fn format_hint(&self) -> FormatHint;
 }
 

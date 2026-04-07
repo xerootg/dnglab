@@ -247,9 +247,10 @@ where
   }
 
   // Apply DCP color profile if a profiles directory was provided
+  let style_hint = decoder.picture_style_hint();
   if let Some(dcp_dir) = &params.dcp_dir {
     let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
-    match find_dcp(dcp_dir, &unique_model) {
+    match find_dcp(dcp_dir, &unique_model, style_hint.as_deref()) {
       Some(dcp_path) => match DcpProfile::load(&dcp_path) {
         Ok(profile) => {
           dng.root_ifd_mut().copy(profile.copy_tags_iter());
@@ -305,7 +306,7 @@ where
     // match the profile name so that ACR/Lightroom picks up the right profile.
     if let Some(dcp_dir) = &params.dcp_dir {
       let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
-      if let Some(dcp_path) = find_dcp(dcp_dir, &unique_model) {
+      if let Some(dcp_path) = find_dcp(dcp_dir, &unique_model, style_hint.as_deref()) {
         if let Ok(profile) = DcpProfile::load(&dcp_path) {
           if let Some(name) = profile.profile_name() {
             xpacket = patch_xmp_camera_profile(xpacket, &name);

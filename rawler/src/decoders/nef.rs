@@ -643,6 +643,26 @@ impl<'a> Decoder for NefDecoder<'a> {
       _ => Ok(None),
     }
   }
+
+  fn picture_style_hint(&self) -> Option<String> {
+    let entry = self.makernote.get_entry(NikonMakernote::PictureControlData)?;
+    let data = entry.get_data();
+    // Picture Control Base is at byte offset 28, null-terminated ASCII, max 20 bytes.
+    // We prefer "Base" over "Name" because the base is the standard preset the
+    // user's custom control derives from (e.g. "Standard" even when they've
+    // tweaked sharpness).
+    let base = null_terminated_ascii(data.get(28..48)?);
+    if !base.is_empty() && base.to_lowercase() != "auto" {
+      return Some(base.to_lowercase());
+    }
+    // Fall back to the Name field (bytes 8..28) for older firmware that may omit Base.
+    let name = null_terminated_ascii(data.get(8..28)?);
+    if !name.is_empty() && name.to_lowercase() != "auto" {
+      Some(name.to_lowercase())
+    } else {
+      None // "Auto" / empty → let find_dcp fall through to "prefer Standard"
+    }
+  }
 }
 
 impl<'a> NefDecoder<'a> {
@@ -1416,6 +1436,10 @@ pub enum NikonMakernote {
   PreviewIFD = 0x0011,
   NrwWB = 0x0014,
   NefSerial = 0x001d,
+  /// Picture Control Data (binary blob, 108 bytes).
+  /// Byte 8..=27: Picture Control Name (null-terminated ASCII, max 20 bytes).
+  /// Byte 28..=47: Picture Control Base (null-terminated ASCII, max 20 bytes).
+  PictureControlData = 0x0023,
   WorldTime = 0x0024,
   ISOInfo = 0x0025,
   DistortInfo = 0x002b,
@@ -1478,3 +1502,8 @@ impl TryFrom<u16> for NefCompression {
 
 // Re-export the shared helper for local use
 use super::jpeg_dimensions;
+
+/// Extract a null-terminated ASCII string from a byte slice.
+fn null_terminated_ascii(bytes: &[u8]) -> String {
+  bytes.iter().take_while(|&&b| b != 0).filter(|&&b| b.is_ascii_graphic() || b == b' ').map(|&b| b as char).collect()
+}

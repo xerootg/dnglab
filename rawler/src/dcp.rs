@@ -94,18 +94,41 @@ impl DcpProfile {
 }
 
 /// Resolve a DCP file path given a profiles directory and a camera's
-/// `UniqueCameraModel` string (e.g. `"NIKON Z F"`).
+/// `UniqueCameraModel` string (e.g. `"Nikon D600"`).
 ///
-/// The function tries `<dir>/<model>.dcp` (case-sensitive) first,
-/// then falls back to a case-insensitive scan of the directory.
-pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str) -> Option<PathBuf> {
-  // Fast path: exact match
+/// `picture_style` is an optional lowercase hint from the camera's
+/// Picture-Control / Picture-Style metadata (e.g. `"standard"`, `"vivid"`,
+/// `"monochrome"`).  When provided it is tried first so that the selected
+/// profile matches the look the photographer chose in-camera.
+///
+/// Lookup order:
+/// 1. `<dir>/<model>.dcp` — case-sensitive exact match (fast path).
+/// 2. Case-insensitive flat scan for `<model>.dcp` in `<dir>/` (backward compat).
+/// 3. A subdirectory whose name case-insensitively matches `<model>` (Adobe layout:
+///    `<dir>/<Model>/<Model> Camera <Mode>.dcp`).  Within that subdirectory the
+///    "best" profile is chosen:
+///      a. (if `picture_style` is set) A file whose name contains the hint
+///         without a "v2" suffix — e.g. `picture_style = "vivid"` selects
+///         `"Nikon Z f Camera Vivid.dcp"`.
+///      b. (if `picture_style` is set) Same but allowing "v2" variants.
+///      c. A file containing "standard" (case-insensitive), excluding "hdr"
+///         and "v2" — the generic camera Standard calibration.
+///      d. Same but including "v2" variants.
+///      e. Any file that does NOT contain "monochrome", excluding "hdr"/"v2".
+///      f. Same but including "v2".
+///      g. Any non-monochrome file.
+///      h. The lexicographically first `.dcp` file (last resort).
+///
+/// Monochrome picture-style DCPs are only chosen by the hint path (step a/b)
+/// or as an absolute last resort (step h).
+pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str, picture_style: Option<&str>) -> Option<PathBuf> {
+  // 1. Exact flat match
   let candidate = dcp_dir.join(format!("{}.dcp", unique_camera_model));
   if candidate.exists() {
     return Some(candidate);
   }
 
-  // Slow path: case-insensitive scan
+  // 2. Case-insensitive flat scan
   let target = unique_camera_model.to_lowercase();
   let target_dcp = format!("{}.dcp", target);
   if let Ok(entries) = std::fs::read_dir(dcp_dir) {
@@ -117,5 +140,78 @@ pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str) -> Option<PathBuf> {
       }
     }
   }
+
+  // 3. Nested subdirectory (Adobe layout: `<dir>/<Model>/`)
+  if let Ok(entries) = std::fs::read_dir(dcp_dir) {
+    for entry in entries.flatten() {
+      if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
+        continue;
+      }
+      let dir_name = entry.file_name();
+      if dir_name.to_string_lossy().to_lowercase() != target {
+        continue;
+      }
+
+      // Collect .dcp files from the matching subdirectory
+      let mut candidates: Vec<PathBuf> = std::fs::read_dir(entry.path())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|f| {
+          f.file_type().map_or(false, |ft| ft.is_file())
+            && f.file_name().to_string_lossy().to_lowercase().ends_with(".dcp")
+        })
+        .map(|f| f.path())
+        .collect();
+
+      if candidates.is_empty() {
+        break;
+      }
+      candidates.sort();
+
+      // Helper: file name in lowercase
+      let fname = |p: &PathBuf| p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+      let is_v2  = |p: &PathBuf| fname(p).contains(" v2.");
+      let is_hdr = |p: &PathBuf| fname(p).contains(" hdr");
+
+      // a/b. If the caller knows which picture style was active, try that first.
+      if let Some(style) = picture_style {
+        if let Some(p) = candidates.iter().find(|p| fname(p).contains(style) && !is_v2(p)) {
+          return Some(p.clone());
+        }
+        if let Some(p) = candidates.iter().find(|p| fname(p).contains(style)) {
+          return Some(p.clone());
+        }
+      }
+
+      // c. "standard", not hdr, not v2   ("Camera Standard.dcp")
+      if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard") && !is_hdr(p) && !is_v2(p)) {
+        return Some(p.clone());
+      }
+      // d. "standard", not hdr, any variant
+      if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard") && !is_hdr(p)) {
+        return Some(p.clone());
+      }
+      // e. "standard" (includes HDR variants — still better than Vivid/Landscape)
+      if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard")) {
+        return Some(p.clone());
+      }
+      // f. not monochrome, not hdr, not v2
+      if let Some(p) = candidates.iter().find(|p| !fname(p).contains("monochrome") && !is_hdr(p) && !is_v2(p)) {
+        return Some(p.clone());
+      }
+      // g. not monochrome, not hdr
+      if let Some(p) = candidates.iter().find(|p| !fname(p).contains("monochrome") && !is_hdr(p)) {
+        return Some(p.clone());
+      }
+      // h. not monochrome
+      if let Some(p) = candidates.iter().find(|p| !fname(p).contains("monochrome")) {
+        return Some(p.clone());
+      }
+      // i. anything
+      return candidates.into_iter().next();
+    }
+  }
+
   None
 }
