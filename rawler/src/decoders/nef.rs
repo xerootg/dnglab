@@ -153,6 +153,8 @@ pub struct NefDecoder<'a> {
   /// Pre-computed OpcodeList1 blob (vignette correction, applied before demosaicing).
   /// Empty when no NikonNEFInfo lens correction data is found.
   opcode_list1: Vec<u8>,
+  /// Pre-computed OpcodeList2 blob (bad pixel correction, applied after linearization).
+  opcode_list2: Vec<u8>,
   /// Pre-computed OpcodeList3 blob (distortion correction, applied after demosaicing).
   opcode_list3: Vec<u8>,
 }
@@ -196,12 +198,19 @@ impl<'a> NefDecoder<'a> {
         .unwrap_or_default()
     };
 
+    // Parse LineDefectInfo from MakerNote tag 0xbe for bad pixel correction.
+    let opcode_list2 = makernote
+      .get_entry(NikonMakernote::LineDefectInfo)
+      .and_then(|entry| build_fix_bad_pixels_opcode(entry.get_data()))
+      .unwrap_or_default();
+
     Ok(NefDecoder {
       tiff,
       rawloader,
       makernote,
       camera,
       opcode_list1,
+      opcode_list2,
       opcode_list3,
     })
   }
@@ -369,7 +378,7 @@ impl<'a> Decoder for NefDecoder<'a> {
   }
 
   fn raw_metadata(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<RawMetadata> {
-    let exif = Exif::new(self.tiff.root_ifd())?;
+    let mut exif = Exif::new(self.tiff.root_ifd())?;
     if let Ok(Some(shot_info)) = self.shot_info() {
       let ori = &shot_info.orientation;
       log::debug!(
@@ -380,13 +389,62 @@ impl<'a> Decoder for NefDecoder<'a> {
         ori.yaw_angle,
       );
     }
-    Ok(match self.get_lens_description() {
+
+    // Tag 0x24 WorldTime: synthesize OffsetTime from MakerNote timezone
+    if exif.offset_time.is_none() {
+      if let Some(offset) = self.get_world_time_offset() {
+        exif.offset_time = Some(offset.clone());
+        exif.offset_time_original = Some(offset.clone());
+        exif.offset_time_digitized = Some(offset);
+      }
+    }
+
+    let mut mdata = match self.get_lens_description() {
       Ok(lens_data) => RawMetadata::new_with_lens(&self.camera, exif, lens_data.cloned()),
       Err(err) => {
         log::warn!("Failed to read lens information: {:?}", err);
         RawMetadata::new(&self.camera, exif)
       }
-    })
+    };
+
+    // Tag 0x84 Lens: fallback LensInfo when lens database doesn't provide it
+    if mdata.exif.lens_spec.is_none() {
+      if let Some(entry) = self.makernote.get_entry(NikonMakernote::Lens) {
+        if let Value::Rational(r) = &entry.value {
+          if r.len() >= 4 {
+            log::debug!("NEF Lens tag 0x84: {}/{} {}/{} {}/{} {}/{}", r[0].n, r[0].d, r[1].n, r[1].d, r[2].n, r[2].d, r[3].n, r[3].d);
+            mdata.exif.lens_spec = Some([r[0], r[1], r[2], r[3]]);
+          }
+        }
+      }
+    }
+
+    // Tag 0x2b DistortInfo: AutoDistortionControl flag
+    if let Some(entry) = self.makernote.get_entry(NikonMakernote::DistortInfo) {
+      let data = entry.get_data();
+      if data.len() >= 5 {
+        let version = std::str::from_utf8(&data[0..4]).unwrap_or("????");
+        let auto_distortion = data[4];
+        log::debug!("NEF DistortInfo: version={}, AutoDistortionControl={}", version, auto_distortion);
+      }
+    }
+
+    // Tag 0x25 ISOInfo: ISO-related sensor data (BigEndian even on LE cameras)
+    if let Some(entry) = self.makernote.get_entry(NikonMakernote::ISOInfo) {
+      let data = entry.get_data();
+      if data.len() >= 6 {
+        let iso_val = BEu16(data, 0);
+        log::debug!("NEF ISOInfo: raw_iso={}, data_len={}", iso_val, data.len());
+      }
+    }
+
+    // Tag 0xc0 WBSensor: raw WB sensor readings
+    if let Some(entry) = self.makernote.get_entry(NikonMakernote::WBSensor) {
+      let data = entry.get_data();
+      log::debug!("NEF WBSensor: data_len={}, data={:02x?}", data.len(), &data[..data.len().min(24)]);
+    }
+
+    Ok(mdata)
   }
 
   fn preview_image(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
@@ -542,8 +600,9 @@ impl<'a> Decoder for NefDecoder<'a> {
           // Fall back to Adobe LCP lens correction profile
           self.lcp_fallback_opcodes()
         };
+        let opc2 = self.opcode_list2.clone();
 
-        if opc1.is_empty() && opc3.is_empty() {
+        if opc1.is_empty() && opc2.is_empty() && opc3.is_empty() {
           return Ok(None);
         }
         let mut ifd = IFD::default();
@@ -551,6 +610,12 @@ impl<'a> Decoder for NefDecoder<'a> {
           ifd.entries.insert(
             DngTag::OpcodeList1.into(),
             Entry { tag: DngTag::OpcodeList1.into(), value: Value::Undefined(opc1), embedded: None },
+          );
+        }
+        if !opc2.is_empty() {
+          ifd.entries.insert(
+            DngTag::OpcodeList2.into(),
+            Entry { tag: DngTag::OpcodeList2.into(), value: Value::Undefined(opc2), embedded: None },
           );
         }
         if !opc3.is_empty() {
@@ -594,6 +659,27 @@ impl<'a> NefDecoder<'a> {
     } else {
       Ok(None)
     }
+  }
+
+  /// Extract timezone offset string from MakerNote WorldTime tag (0x24).
+  /// Format: bytes 0-1 = int16s timezone offset in minutes, byte 2 = DST, byte 3 = date format.
+  fn get_world_time_offset(&self) -> Option<String> {
+    let entry = self.makernote.get_entry(NikonMakernote::WorldTime)?;
+    let data = entry.get_data();
+    if data.len() < 4 {
+      return None;
+    }
+    let tz_minutes = if self.tiff.little_endian() {
+      i16::from_le_bytes([data[0], data[1]])
+    } else {
+      i16::from_be_bytes([data[0], data[1]])
+    };
+    let hours = tz_minutes / 60;
+    let mins = (tz_minutes % 60).unsigned_abs();
+    let sign = if tz_minutes >= 0 { '+' } else { '-' };
+    let offset = format!("{}{:02}:{:02}", sign, hours.unsigned_abs(), mins);
+    log::debug!("NEF WorldTime: tz_minutes={}, DST={}, offset={}", tz_minutes, data[2], offset);
+    Some(offset)
   }
 
   /// Get lens description by analyzing TIFF tags and makernotes
@@ -1089,20 +1175,30 @@ fn parse_nikon_nef_opcodes(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
   if data.len() < 20 || &data[0..6] != b"Nikon\0" {
     return None;
   }
-  // Only handle little-endian sub-IFD for now
-  if &data[10..12] != b"II" {
-    debug!("parse_nikon_nef_opcodes: big-endian NikonNEFInfo not supported");
-    return None;
-  }
-  // IFD offset is relative to the "II" marker at data[10]
-  let ifd_offset = u32::from_le_bytes(data[14..18].try_into().ok()?) as usize;
+  let big_endian = match &data[10..12] {
+    b"II" => false,
+    b"MM" => true,
+    _ => {
+      debug!("parse_nikon_nef_opcodes: unknown byte order marker");
+      return None;
+    }
+  };
+  let read_u16 = if big_endian { |d: &[u8]| u16::from_be_bytes([d[0], d[1]]) } else { |d: &[u8]| u16::from_le_bytes([d[0], d[1]]) };
+  let read_u32 = if big_endian {
+    |d: &[u8]| u32::from_be_bytes([d[0], d[1], d[2], d[3]])
+  } else {
+    |d: &[u8]| u32::from_le_bytes([d[0], d[1], d[2], d[3]])
+  };
+
+  // IFD offset is relative to the byte-order marker at data[10]
+  let ifd_offset = read_u32(&data[14..18]) as usize;
   let ii_base = 10usize;
   let ifd_start = ii_base + ifd_offset; // = 18
 
   if ifd_start + 2 > data.len() {
     return None;
   }
-  let num_entries = u16::from_le_bytes(data[ifd_start..ifd_start + 2].try_into().ok()?) as usize;
+  let num_entries = read_u16(&data[ifd_start..ifd_start + 2]) as usize;
 
   let mut dist_blob: Option<&[u8]> = None;
   let mut vig_blob: Option<&[u8]> = None;
@@ -1112,13 +1208,13 @@ fn parse_nikon_nef_opcodes(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     if e + 12 > data.len() {
       break;
     }
-    let tag = u16::from_le_bytes(data[e..e + 2].try_into().ok()?);
-    let typ = u16::from_le_bytes(data[e + 2..e + 4].try_into().ok()?);
-    let count = u32::from_le_bytes(data[e + 4..e + 8].try_into().ok()?) as usize;
-    let raw_offset = u32::from_le_bytes(data[e + 8..e + 12].try_into().ok()?) as usize;
+    let tag = read_u16(&data[e..e + 2]);
+    let typ = read_u16(&data[e + 2..e + 4]);
+    let count = read_u32(&data[e + 4..e + 8]) as usize;
+    let raw_offset = read_u32(&data[e + 8..e + 12]) as usize;
 
     if typ == 7 && count > 4 {
-      // UNDEFINED with external offset (relative to "II" marker at data[10])
+      // UNDEFINED with external offset (relative to byte-order marker at data[10])
       let blob_start = ii_base + raw_offset;
       let blob_end = blob_start + count;
       if blob_end <= data.len() {
@@ -1131,8 +1227,9 @@ fn parse_nikon_nef_opcodes(data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     }
   }
 
-  let opcode_list3 = dist_blob.and_then(build_warp_rectilinear_opcode).unwrap_or_default();
-  let opcode_list1 = vig_blob.and_then(build_fix_vignette_opcode).unwrap_or_default();
+  let read_rational = if big_endian { read_rational64s_be } else { read_rational64s };
+  let opcode_list3 = dist_blob.and_then(|b| build_warp_rectilinear_opcode(b, read_rational)).unwrap_or_default();
+  let opcode_list1 = vig_blob.and_then(|b| build_fix_vignette_opcode(b, read_rational)).unwrap_or_default();
 
   if opcode_list1.is_empty() && opcode_list3.is_empty() {
     return None;
@@ -1155,11 +1252,25 @@ fn read_rational64s(blob: &[u8], off: usize) -> Option<f64> {
   }
 }
 
+/// Read a `rational64s` (pair of i32 BE) from a blob at byte offset `off`.
+fn read_rational64s_be(blob: &[u8], off: usize) -> Option<f64> {
+  if off + 8 > blob.len() {
+    return None;
+  }
+  let num = i32::from_be_bytes(blob[off..off + 4].try_into().ok()?) as f64;
+  let den = i32::from_be_bytes(blob[off + 4..off + 8].try_into().ok()?) as f64;
+  if den == 0.0 {
+    None
+  } else {
+    Some(num / den)
+  }
+}
+
 /// Build a WarpRectilinear OpcodeList blob from a DistortionInfo blob.
 ///
 /// The correction flag at offset 0x04 must be 1 or 3 (on); if it is 0 or 2
 /// (no lens / off) the function returns `None` so no opcode is written.
-fn build_warp_rectilinear_opcode(blob: &[u8]) -> Option<Vec<u8>> {
+fn build_warp_rectilinear_opcode(blob: &[u8], read_rational: fn(&[u8], usize) -> Option<f64>) -> Option<Vec<u8>> {
   if blob.len() < 0x2C {
     return None;
   }
@@ -1171,9 +1282,9 @@ fn build_warp_rectilinear_opcode(blob: &[u8]) -> Option<Vec<u8>> {
   }
 
   // Three radial correction coefficients at rational64s offsets 0x14, 0x1C, 0x24
-  let d1 = read_rational64s(blob, 0x14).unwrap_or(0.0);
-  let d2 = read_rational64s(blob, 0x1C).unwrap_or(0.0);
-  let d3 = read_rational64s(blob, 0x24).unwrap_or(0.0);
+  let d1 = read_rational(blob, 0x14).unwrap_or(0.0);
+  let d2 = read_rational(blob, 0x1C).unwrap_or(0.0);
+  let d3 = read_rational(blob, 0x24).unwrap_or(0.0);
 
   // DNG WarpRectilinear: x' = cx + m·(kr0 + kr1·r² + kr2·r⁴ + kr3·r⁶)·dx
   // kr0 = 1.0 (identity scale), Nikon coefficients map to kr1..kr3.
@@ -1187,7 +1298,7 @@ fn build_warp_rectilinear_opcode(blob: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Build a FixVignetteRadial OpcodeList blob from a VignetteInfo blob.
-fn build_fix_vignette_opcode(blob: &[u8]) -> Option<Vec<u8>> {
+fn build_fix_vignette_opcode(blob: &[u8], read_rational: fn(&[u8], usize) -> Option<f64>) -> Option<Vec<u8>> {
   if blob.len() < 0x4C {
     return None;
   }
@@ -1197,15 +1308,72 @@ fn build_fix_vignette_opcode(blob: &[u8]) -> Option<Vec<u8>> {
   // The optional 4th coefficient is at 0x4C with an alternative denominator of 1
   // (not 1048576 like the others): bytes 0x4C-0x4F = numerator, 0x50-0x53 = denominator.
   // ExifTool notes it "seems to always be 0".
-  let k0 = read_rational64s(blob, 0x24).unwrap_or(0.0);
-  let k1 = read_rational64s(blob, 0x34).unwrap_or(0.0);
-  let k2 = read_rational64s(blob, 0x44).unwrap_or(0.0);
+  let k0 = read_rational(blob, 0x24).unwrap_or(0.0);
+  let k1 = read_rational(blob, 0x34).unwrap_or(0.0);
+  let k2 = read_rational(blob, 0x44).unwrap_or(0.0);
   // 4th coefficient: denominator is 1 (not 1048576), so typically = 0/1 = 0
-  let k3 = if blob.len() >= 0x54 { read_rational64s(blob, 0x4C).unwrap_or(0.0) } else { 0.0 };
+  let k3 = if blob.len() >= 0x54 { read_rational(blob, 0x4C).unwrap_or(0.0) } else { 0.0 };
 
   log::debug!("NEF FixVignetteRadial: k0={:.5} k1={:.5} k2={:.5} k3={:.5}", k0, k1, k2, k3);
 
   let opcode = opcodes::encode_fix_vignette_radial(k0, k1, k2, k3, 0.0, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+  Some(opcodes::encode_opcode_list(&[opcode]))
+}
+
+/// Parse LineDefectInfo from MakerNote tag 0xbe and build a FixBadPixelsList
+/// OpcodeList2 blob.
+///
+/// LineDefectInfo format :
+///   Byte 0-3: Version "0100" (ASCII)
+///   Byte 4-5: u16_BE entry count
+///   Per entry (6 bytes):
+///     +0: bool type_flag_0 (column defect)
+///     +1: bool type_flag_1 (row-related defect)
+///     +2: bool type_flag_2 (reserved)
+///     +3: pad
+///     +4: u16_BE position (line/column index)
+fn build_fix_bad_pixels_opcode(data: &[u8]) -> Option<Vec<u8>> {
+  if data.len() < 6 {
+    return None;
+  }
+  // Verify version
+  if &data[0..4] != b"0100" {
+    debug!("NEF LineDefectInfo: unsupported version {:?}", &data[0..4]);
+    return None;
+  }
+  let count = u16::from_be_bytes([data[4], data[5]]) as usize;
+  if count == 0 {
+    return None;
+  }
+  let expected_len = 6 + count * 6;
+  if data.len() < expected_len {
+    debug!("NEF LineDefectInfo: data too short ({} bytes, expected {})", data.len(), expected_len);
+    return None;
+  }
+
+  let mut bad_columns: Vec<u32> = Vec::new();
+
+  for i in 0..count {
+    let off = 6 + i * 6;
+    let flag_0 = data[off] != 0;
+    let _flag_1 = data[off + 1] != 0;
+    let _flag_2 = data[off + 2] != 0;
+    let position = u16::from_be_bytes([data[off + 4], data[off + 5]]) as u32;
+
+    // flag_0 indicates a column defect — the primary type for sensor line defects
+    if flag_0 {
+      bad_columns.push(position);
+    }
+  }
+
+  if bad_columns.is_empty() {
+    return None;
+  }
+
+  log::debug!("NEF LineDefectInfo: {} bad columns detected", bad_columns.len());
+
+  // BayerPhase 0 = top-left pixel is R in RGGB. This is the most common Nikon CFA phase.
+  let opcode = opcodes::encode_fix_bad_pixels_list(0, &[], &bad_columns, opcodes::FLAG_OPTIONAL);
   Some(opcodes::encode_opcode_list(&[opcode]))
 }
 
@@ -1234,11 +1402,15 @@ pub enum NikonMakernote {
   PreviewIFD = 0x0011,
   NrwWB = 0x0014,
   NefSerial = 0x001d,
+  WorldTime = 0x0024,
+  ISOInfo = 0x0025,
+  DistortInfo = 0x002b,
   ImageSizeRaw = 0x003e,
   CropArea = 0x0045,
   BlackLevel = 0x003d,
   Makernotes0x51 = 0x0051,
   LensType = 0x0083,
+  Lens = 0x0084,
   NefMeta1 = 0x008c,
   NefMeta2 = 0x0096,
   ShotInfo = 0x0091,
@@ -1246,6 +1418,8 @@ pub enum NikonMakernote {
   NefWB1 = 0x0097,
   LensData = 0x0098,
   NefKey = 0x00a7,
+  LineDefectInfo = 0x00be,
+  WBSensor = 0x00c0,
 }
 
 /// Known NEF compression formats

@@ -371,6 +371,14 @@ impl<'a> Decoder for Rw2Decoder<'a> {
             embedded: None,
           },
         );
+        ifd.entries.insert(
+          DngTag::NoiseReductionApplied.into(),
+          Entry {
+            tag: DngTag::NoiseReductionApplied.into(),
+            value: Value::Rational(vec![Rational::new(0, 1)]),
+            embedded: None,
+          },
+        );
 
         // Add WarpRectilinear distortion correction if available.
         if let Some(ref dp) = self.dist_params {

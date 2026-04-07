@@ -102,6 +102,28 @@ pub fn encode_warp_rectilinear(kr: &[[f64; 4]], kt: &[[f64; 2]], cx: f64, cy: f6
     opcode_header(1, flags, &params)
 }
 
+/// Encode a **FixBadPixelsList** opcode (ID=6, DNG 1.3).
+///
+/// Corrects known defective pixels and columns by interpolation.
+/// `bayer_phase`: the Bayer mosaic phase (0-3) of the top-left pixel.
+/// `bad_points`: list of individual bad pixel (row, column) pairs.
+/// `bad_columns`: list of entirely defective column indices.
+pub fn encode_fix_bad_pixels_list(bayer_phase: u32, bad_points: &[(u32, u32)], bad_columns: &[u32], flags: u32) -> Vec<u8> {
+    let param_size = 4 + 4 + 4 + bad_points.len() * 8 + bad_columns.len() * 4;
+    let mut params = Vec::with_capacity(param_size);
+    write_u32_be(&mut params, bayer_phase);
+    write_u32_be(&mut params, bad_points.len() as u32);
+    write_u32_be(&mut params, bad_columns.len() as u32);
+    for &(row, col) in bad_points {
+        write_u32_be(&mut params, row);
+        write_u32_be(&mut params, col);
+    }
+    for &col in bad_columns {
+        write_u32_be(&mut params, col);
+    }
+    opcode_header(6, flags, &params)
+}
+
 /// Wrap one or more encoded opcodes into a complete OpcodeList blob.
 ///
 /// The blob begins with a big-endian u32 count, followed by the
