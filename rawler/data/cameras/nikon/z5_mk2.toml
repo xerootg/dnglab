@@ -4,6 +4,12 @@ clean_make = "Nikon"
 clean_model = "Z 5 II"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
+baseline_exposure = 0.25
+baseline_noise = 0.6
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 150
 
 [cameras.color_matrix]
 A = [1.2583, -0.6925, 0.1406, -0.3319, 1.0489, 0.3286, -0.0088, 0.0801, 0.8495]

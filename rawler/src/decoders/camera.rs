@@ -52,6 +52,12 @@ pub struct Camera {
   /// NoiseProfile per DNG spec: pairs of (noise_scale, noise_offset) per color plane.
   /// For a 3-plane sensor: [s0, o0, s1, o1, s2, o2] (6 doubles).
   pub noise_profile: Option<Vec<f64>>,
+  /// AntiAliasStrength: 0.0 = no AA filter, 1.0 = standard AA filter.
+  pub anti_alias_strength: Option<f32>,
+  /// BayerGreenSplit: green channel inter-pixel variance (0 = best, higher = worse).
+  pub bayer_green_split: Option<u32>,
+  /// DefaultUserCrop: [top, left, bottom, right] as fractions of the active area.
+  pub default_user_crop: Option<[f64; 4]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -273,6 +279,22 @@ impl Camera {
           let arr = val.as_array().expect("noise_profile must be an array of floats");
           self.noise_profile = Some(arr.iter().map(|v| v.as_float().expect("noise_profile values must be floats")).collect());
         }
+        n @ "anti_alias_strength" => {
+          self.anti_alias_strength = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+        }
+        n @ "bayer_green_split" => {
+          self.bayer_green_split = Some(val.as_integer().unwrap_or_else(|| panic!("{} must be an integer", n)) as u32);
+        }
+        "default_user_crop" => {
+          let arr = val.as_array().expect("default_user_crop must be an array of 4 floats");
+          assert_eq!(arr.len(), 4, "default_user_crop must have exactly 4 values");
+          self.default_user_crop = Some([
+            arr[0].as_float().expect("default_user_crop values must be floats"),
+            arr[1].as_float().expect("default_user_crop values must be floats"),
+            arr[2].as_float().expect("default_user_crop values must be floats"),
+            arr[3].as_float().expect("default_user_crop values must be floats"),
+          ]);
+        }
         key => {
           panic!("Unknown key: {}", key);
         }
@@ -314,6 +336,9 @@ impl Camera {
       baseline_sharpness: None,
       linear_response_limit: None,
       noise_profile: None,
+      anti_alias_strength: None,
+      bayer_green_split: None,
+      default_user_crop: None,
       //orientation: Orientation::Unknown,
     }
   }

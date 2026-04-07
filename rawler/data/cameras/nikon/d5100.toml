@@ -5,6 +5,12 @@ clean_model = "D5100"
 color_pattern = "RGGB"
 active_area = [0, 0, 44, 0]
 crop_area = [8, 8, 56, 8]
+baseline_exposure = 0.25
+baseline_noise = 0.9
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 300
 
 [cameras.color_matrix]
 A = [0.8642, -0.3058, -0.0243, -0.3999, 1.1033, 0.3422, -0.0453, 0.1099, 0.7814]

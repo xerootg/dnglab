@@ -490,6 +490,22 @@ where
     self.root_ifd.add_tag(DngTag::NoiseProfile, profile);
   }
 
+  pub fn anti_alias_strength(&mut self, strength: Rational) {
+    self.root_ifd.add_tag(DngTag::AntiAliasStrength, strength);
+  }
+
+  pub fn bayer_green_split(&mut self, split: u32) {
+    self.root_ifd.add_tag(DngTag::BayerGreenSplit, split);
+  }
+
+  pub fn analog_balance(&mut self, balance: &[Rational]) {
+    self.root_ifd.add_tag(DngTag::AnalogBalance, balance);
+  }
+
+  pub fn default_user_crop(&mut self, crop: &[Rational]) {
+    self.root_ifd.add_tag(DngTag::DefaultUserCrop, crop);
+  }
+
   pub fn load_metadata(&mut self, metadata: &RawMetadata) -> Result<()> {
     metadata.write_exif_tags(&mut self.dng, &mut self.root_ifd, &mut self.exif_ifd)?;
 

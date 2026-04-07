@@ -590,6 +590,20 @@ impl<'a> Decoder for NefDecoder<'a> {
           }
         }
 
+        // AnalogBalance: Nikon cameras apply WB digitally, so analog gain is unity.
+        // AsShotNeutral (from wb_coeffs) carries the full white balance information.
+        let cpp = self.camera.cfa.unique_colors();
+        let analog_balance: Vec<crate::formats::tiff::Rational> =
+          (0..cpp).map(|_| crate::formats::tiff::Rational::new(1, 1)).collect();
+        ifd.entries.insert(
+          DngTag::AnalogBalance.into(),
+          Entry {
+            tag: DngTag::AnalogBalance.into(),
+            value: Value::Rational(analog_balance),
+            embedded: None,
+          },
+        );
+
         Ok(Some(Rc::new(ifd)))
       }
       WellKnownIFD::VirtualDngRawTags => {

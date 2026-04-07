@@ -5,6 +5,12 @@ clean_model = "Df"
 color_pattern = "RGGB"
 active_area = [2, 0, 50, 0]
 crop_area = [8, 6, 56, 6]
+baseline_exposure = 0.25
+baseline_noise = 0.6
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 200
 
 [cameras.color_matrix]
 A = [0.9033, -0.3555, -0.0287, -0.4881, 1.2214, 0.3022, -0.0459, 0.0926, 0.7932]

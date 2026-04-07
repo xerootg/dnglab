@@ -5,6 +5,12 @@ clean_model = "D750"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [8, 8, 8, 8]
+baseline_exposure = 0.25
+baseline_noise = 0.6
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 200
 
 [cameras.color_matrix]
 A = [1.0019, -0.42, -0.0032, -0.4773, 1.2481, 0.2572, -0.0643, 0.1409, 0.8486]

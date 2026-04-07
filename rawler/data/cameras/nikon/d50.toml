@@ -5,6 +5,12 @@ clean_model = "D50"
 color_pattern = "BGGR"
 active_area = [0, 0, 0, 0]
 crop_area = [15, 7, 17, 7]
+baseline_exposure = 0.25
+baseline_noise = 0.9
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 400
 
 [cameras.color_matrix]
 A = [0.9505, -0.4311, 0.022, -0.6712, 1.4078, 0.2902, -0.0318, 0.042, 0.7267]

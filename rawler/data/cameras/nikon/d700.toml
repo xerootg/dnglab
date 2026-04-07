@@ -5,6 +5,12 @@ clean_model = "D700"
 color_pattern = "RGGB"
 active_area = [2, 0, 2, 0]
 crop_area = [15, 6, 17, 6]
+baseline_exposure = 0.25
+baseline_noise = 0.7
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 250
 
 [cameras.color_matrix]
 A = [0.9336, -0.3405, 0.0014, -0.7321, 1.4779, 0.2764, -0.0914, 0.1171, 0.8248]

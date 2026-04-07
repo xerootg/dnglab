@@ -5,6 +5,12 @@ clean_model = "D80"
 color_pattern = "GBRG"
 active_area = [0, 0, 4, 4]
 crop_area = [14, 9, 18, 15]
+baseline_exposure = 0.25
+baseline_noise = 0.9
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 400
 
 [cameras.color_matrix]
 A = [0.9875, -0.3671, -0.0203, -0.7719, 1.5276, 0.2626, -0.0648, 0.0723, 0.8706]

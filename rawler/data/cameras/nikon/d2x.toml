@@ -5,6 +5,12 @@ clean_model = "D2X"
 color_pattern = "RGGB"
 active_area = [0, 0, 8, 0]
 crop_area = [16, 10, 16, 10]
+baseline_exposure = 0.0
+baseline_noise = 0.8
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 350
 
 [cameras.color_matrix]
 A = [1.0996, -0.3606, -0.0715, -0.7096, 1.441, 0.2947, -0.046, 0.0487, 0.7018]

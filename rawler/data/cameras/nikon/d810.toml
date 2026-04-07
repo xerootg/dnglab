@@ -5,6 +5,12 @@ clean_model = "D810"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [12, 8, 8, 8]
+baseline_exposure = 0.25
+baseline_noise = 0.7
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 200
 
 [cameras.color_matrix]
 A = [1.0354, -0.4532, 0.0031, -0.5168, 1.2906, 0.2518, -0.0733, 0.1407, 0.8361]

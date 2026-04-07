@@ -5,6 +5,12 @@ clean_model = "D610"
 color_pattern = "RGGB"
 active_area = [0, 0, 46, 0]
 crop_area = [8, 6, 56, 6]
+baseline_exposure = 0.25
+baseline_noise = 0.6
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 200
 
 [cameras.color_matrix]
 A = [0.8508, -0.2966, 0.0171, -0.3991, 1.0849, 0.3635, -0.0467, 0.1053, 0.8072]

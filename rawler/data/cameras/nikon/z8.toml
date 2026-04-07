@@ -5,6 +5,12 @@ clean_model = "Z 8"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [12, 8, 12, 8]
+baseline_exposure = 0.25
+baseline_noise = 0.65
+baseline_sharpness = 1.2
+linear_response_limit = 1.0
+anti_alias_strength = 0.0
+bayer_green_split = 100
 
 [cameras.color_matrix]
 A = [1.3998, -0.8092, 0.0284, -0.4723, 1.2772, 0.2159, -0.0164, 0.0624, 0.8674]

@@ -5,6 +5,12 @@ clean_model = "D100"
 color_pattern = "GRBG"
 active_area = [0, 0, 8, 0]
 crop_area = [11, 12, 21, 12]
+baseline_exposure = 0.25
+baseline_noise = 1.0
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 500
 
 [cameras.color_matrix]
 A = [0.6408, -0.1391, -0.0554, -0.7732, 1.5177, 0.2762, -0.0663, 0.0833, 0.6678]

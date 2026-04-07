@@ -5,6 +5,12 @@ clean_model = "D3300"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [8, 8, 8, 8]
+baseline_exposure = 0.25
+baseline_noise = 0.9
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 300
 
 [cameras.color_matrix]
 A = [0.9672, -0.4153, 0.0064, -0.412, 1.1852, 0.2571, -0.094, 0.1812, 0.7894]

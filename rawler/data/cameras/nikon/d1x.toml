@@ -5,6 +5,12 @@ clean_model = "D1X"
 color_pattern = "BGGR"
 active_area = [0, 0, 4, 0]
 crop_area = [5, 6, 11, 10]
+baseline_exposure = 0.0
+baseline_noise = 1.0
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 500
 default_scale = [[3, 4], [3, 2]]
 best_quality_scale = [4, 3]
 

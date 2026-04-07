@@ -5,6 +5,12 @@ clean_model = "D2Hs"
 color_pattern = "GBRG"
 active_area = [6, 0, 8, 0]
 crop_area = [16, 9, 16, 7]
+baseline_exposure = 0.0
+baseline_noise = 0.8
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 400
 
 [cameras.color_matrix]
 A = [0.6562, -0.1792, -0.0314, -0.6967, 1.4736, 0.2402, -0.1709, 0.2719, 0.7642]

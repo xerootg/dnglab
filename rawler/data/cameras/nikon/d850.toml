@@ -5,6 +5,12 @@ clean_model = "D850"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [16, 8, 16, 8] # TODO: This camera has Large/Medium/Small format with different crop
+baseline_exposure = 0.25
+baseline_noise = 0.8
+baseline_sharpness = 1.2
+linear_response_limit = 1.0
+anti_alias_strength = 0.0
+bayer_green_split = 100
 
 [cameras.color_matrix]
 A = [1.1284, -0.4911, -0.0608, -0.6062, 1.4228, 0.196, -0.0877, 0.1605, 0.8117]

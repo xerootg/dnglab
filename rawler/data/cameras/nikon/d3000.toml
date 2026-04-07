@@ -5,6 +5,12 @@ clean_model = "D3000"
 color_pattern = "GBRG"
 active_area = [0, 0, 4, 4]
 crop_area = [14, 9, 18, 15]
+baseline_exposure = 0.25
+baseline_noise = 0.9
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 300
 
 [cameras.color_matrix]
 A = [0.9768, -0.3578, -0.0263, -0.7716, 1.5197, 0.272, -0.0601, 0.0671, 0.8454]

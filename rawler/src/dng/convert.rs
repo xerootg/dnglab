@@ -231,6 +231,20 @@ where
   if let Some(ref np) = rawimage.camera.noise_profile {
     dng.noise_profile(np);
   }
+  if let Some(aas) = rawimage.camera.anti_alias_strength {
+    dng.anti_alias_strength(Rational::new((aas * 100.0) as u32, 100));
+  }
+  if let Some(bgs) = rawimage.camera.bayer_green_split {
+    dng.bayer_green_split(bgs);
+  }
+  if let Some(duc) = rawimage.camera.default_user_crop {
+    dng.default_user_crop(&[
+      Rational::new((duc[0] * 1_000_000.0) as u32, 1_000_000),
+      Rational::new((duc[1] * 1_000_000.0) as u32, 1_000_000),
+      Rational::new((duc[2] * 1_000_000.0) as u32, 1_000_000),
+      Rational::new((duc[3] * 1_000_000.0) as u32, 1_000_000),
+    ]);
+  }
 
   // Apply DCP color profile if a profiles directory was provided
   if let Some(dcp_dir) = &params.dcp_dir {

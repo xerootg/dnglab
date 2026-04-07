@@ -5,6 +5,12 @@ clean_model = "D300S"
 color_pattern = "RGGB"
 active_area = [0, 0, 32, 0]
 crop_area = [15, 10, 49, 10]
+baseline_exposure = 0.25
+baseline_noise = 0.8
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 300
 
 [cameras.color_matrix]
 A = [1.0354, -0.3401, 0.0054, -0.7111, 1.4628, 0.2702, -0.135, 0.2011, 0.8528]

@@ -5,6 +5,12 @@ clean_model = "D4S"
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [4, 4, 4, 4]
+baseline_exposure = 0.25
+baseline_noise = 0.6
+baseline_sharpness = 1.0
+linear_response_limit = 1.0
+anti_alias_strength = 1.0
+bayer_green_split = 200
 
 [cameras.color_matrix]
 A = [0.9033, -0.3555, -0.0287, -0.4881, 1.2214, 0.3022, -0.0459, 0.0926, 0.7932]
