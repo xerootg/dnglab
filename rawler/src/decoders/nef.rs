@@ -647,16 +647,23 @@ impl<'a> Decoder for NefDecoder<'a> {
   fn picture_style_hint(&self) -> Option<String> {
     let entry = self.makernote.get_entry(NikonMakernote::PictureControlData)?;
     let data = entry.get_data();
-    // Picture Control Base is at byte offset 28, null-terminated ASCII, max 20 bytes.
-    // We prefer "Base" over "Name" because the base is the standard preset the
-    // user's custom control derives from (e.g. "Standard" even when they've
-    // tweaked sharpness).
-    let base = null_terminated_ascii(data.get(28..48)?);
+    // First 4 bytes are the version string ("0100", "0200", "0300", "0301", ...).
+    // PictureControl3 (version "03xx"): Name at bytes 8..28, Base at bytes 28..48.
+    // PictureControl1/2 ("01xx"/"02xx"): Name at bytes 4..24, Base at bytes 24..44.
+    let version = data.get(0..4)?;
+    let (name_range, base_range) = if version.starts_with(b"03") {
+      (8..28usize, 28..48usize)
+    } else {
+      (4..24usize, 24..44usize)
+    };
+    // Prefer "Base" over "Name": Base is the standard preset the custom control
+    // derives from (e.g. "Standard" even when the user tweaked sharpness).
+    let base = null_terminated_ascii(data.get(base_range)?);
     if !base.is_empty() && base.to_lowercase() != "auto" {
       return Some(base.to_lowercase());
     }
-    // Fall back to the Name field (bytes 8..28) for older firmware that may omit Base.
-    let name = null_terminated_ascii(data.get(8..28)?);
+    // Fall back to the Name field.
+    let name = null_terminated_ascii(data.get(name_range)?);
     if !name.is_empty() && name.to_lowercase() != "auto" {
       Some(name.to_lowercase())
     } else {
@@ -1436,9 +1443,13 @@ pub enum NikonMakernote {
   PreviewIFD = 0x0011,
   NrwWB = 0x0014,
   NefSerial = 0x001d,
-  /// Picture Control Data (binary blob, 108 bytes).
-  /// Byte 8..=27: Picture Control Name (null-terminated ASCII, max 20 bytes).
-  /// Byte 28..=47: Picture Control Base (null-terminated ASCII, max 20 bytes).
+  /// Picture Control Data (binary blob, version-dependent size).
+  /// Version "03xx" (PictureControl3, 108 bytes):
+  ///   Byte 8..=27: Picture Control Name (null-terminated ASCII, max 20 bytes).
+  ///   Byte 28..=47: Picture Control Base (null-terminated ASCII, max 20 bytes).
+  /// Version "01xx"/"02xx" (PictureControl1/2, 58/68 bytes):
+  ///   Byte 4..=23: Picture Control Name (null-terminated ASCII, max 20 bytes).
+  ///   Byte 24..=43: Picture Control Base (null-terminated ASCII, max 20 bytes).
   PictureControlData = 0x0023,
   WorldTime = 0x0024,
   ISOInfo = 0x0025,
