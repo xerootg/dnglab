@@ -9,5 +9,9 @@ hints = ["interlaced"]
 active_area = [0, 0, 0, 0]
 crop_area = [8, 2, 8, 3]
 
+baseline_exposure = -0.4
+baseline_noise = 4.0
+baseline_sharpness = 1.33
+
 [cameras.color_matrix]
 D65 = [0.9493, -0.3415, -0.0666, -0.5211, 1.2334, 0.326, -0.1548, 0.2262, 0.6482]

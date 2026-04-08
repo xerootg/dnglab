@@ -8,6 +8,10 @@ color_pattern = "BGGR"
 active_area = [0, 0, 0, 0]
 crop_area = [8, 8, 24, 8]
 
+baseline_noise = 1.5
+baseline_sharpness = 1.5
+bayer_green_split = 250
+
 [cameras.color_matrix]
 A = [1.1528, -0.5742, 0.0118, -0.2453, 1.0205, 0.2619, -0.0751, 0.189, 0.6539]
 D65 = [0.7687, -0.1984, -0.0606, -0.4327, 1.1928, 0.2721, -0.1381, 0.2339, 0.6452]

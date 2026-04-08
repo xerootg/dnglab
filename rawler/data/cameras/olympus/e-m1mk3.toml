@@ -8,6 +8,10 @@ color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 highres_width = 10000
 
+baseline_noise = 1.5
+baseline_sharpness = 1.5
+bayer_green_split = 250
+
 [cameras.color_matrix]
 A = [1.3782, -0.7726, 0.0645, -0.3366, 1.2336, 0.1103, -0.0082, 0.0624, 0.5955]
 D65 = [1.1896, -0.511, -0.1076, -0.3181, 1.1378, 0.2048, -0.0519, 0.1224, 0.5166]
