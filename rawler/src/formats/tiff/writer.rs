@@ -344,6 +344,8 @@ impl crate::decoders::RawMetadata {
     transfer_entry(exif_ifd, ExifTag::WaterDepth, &exif.water_depth)?;
     transfer_entry(exif_ifd, ExifTag::Acceleration, &exif.acceleration)?;
     transfer_entry_undefined(exif_ifd, ExifTag::FileSource, &exif.file_source)?;
+    transfer_entry_undefined(exif_ifd, ExifTag::SceneType, &exif.scene_type)?;
+    transfer_entry_undefined(exif_ifd, ExifTag::CFAPattern, &exif.cfa_pattern)?;
 
     Ok(())
   }

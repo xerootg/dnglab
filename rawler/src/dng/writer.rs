@@ -498,6 +498,14 @@ where
     self.root_ifd.add_tag(DngTag::BayerGreenSplit, split);
   }
 
+  pub fn camera_calibration(&mut self, slot: usize, matrix: impl AsRef<[SRational]>) {
+    match slot {
+      1 => self.root_ifd.add_tag(DngTag::CameraCalibration1, matrix.as_ref()),
+      2 => self.root_ifd.add_tag(DngTag::CameraCalibration2, matrix.as_ref()),
+      _ => todo!(),
+    }
+  }
+
   pub fn analog_balance(&mut self, balance: &[Rational]) {
     self.root_ifd.add_tag(DngTag::AnalogBalance, balance);
   }

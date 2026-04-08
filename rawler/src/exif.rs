@@ -73,6 +73,8 @@ pub struct Exif {
   pub water_depth: Option<SRational>,
   pub acceleration: Option<Rational>,
   pub file_source: Option<Vec<u8>>,
+  pub scene_type: Option<Vec<u8>>,
+  pub cfa_pattern: Option<Vec<u8>>,
   pub image_description: Option<String>,
 }
 
@@ -195,6 +197,8 @@ impl Exif {
           (ExifTag::WaterDepth, Value::SRational(data)) => self.water_depth = data.get(0).cloned(),
           (ExifTag::Acceleration, Value::Rational(data)) => self.acceleration = data.get(0).cloned(),
           (ExifTag::FileSource, Value::Undefined(data)) => self.file_source = Some(data.clone()),
+          (ExifTag::SceneType, Value::Undefined(data)) => self.scene_type = Some(data.clone()),
+          (ExifTag::CFAPattern, Value::Undefined(data)) => self.cfa_pattern = Some(data.clone()),
           (ExifTag::ImageDescription, Value::Ascii(data)) => self.image_description = data.strings().get(0).map(trim),
           (tag, _value) => {
             log::debug!("Ignoring EXIF tag: {:?}", tag);

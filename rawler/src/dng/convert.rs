@@ -237,6 +237,15 @@ where
   if let Some(bgs) = rawimage.camera.bayer_green_split {
     dng.bayer_green_split(bgs);
   }
+  if let Some(cc) = rawimage.camera.camera_calibration {
+    let matrix = [
+      SRational::new((cc[0] * 10000.0) as i32, 10000), SRational::new(0, 10000), SRational::new(0, 10000),
+      SRational::new(0, 10000), SRational::new((cc[1] * 10000.0) as i32, 10000), SRational::new(0, 10000),
+      SRational::new(0, 10000), SRational::new(0, 10000), SRational::new((cc[2] * 10000.0) as i32, 10000),
+    ];
+    dng.camera_calibration(1, &matrix);
+    dng.camera_calibration(2, &matrix);
+  }
   if let Some(duc) = rawimage.camera.default_user_crop {
     dng.default_user_crop(&[
       Rational::new((duc[0] * 1_000_000.0) as u32, 1_000_000),

@@ -58,6 +58,9 @@ pub struct Camera {
   pub bayer_green_split: Option<u32>,
   /// DefaultUserCrop: [top, left, bottom, right] as fractions of the active area.
   pub default_user_crop: Option<[f64; 4]>,
+  /// CameraCalibration: 3x3 diagonal matrix as [r, g, b] scaling factors.
+  /// Written as both CameraCalibration1 and CameraCalibration2 DNG tags.
+  pub camera_calibration: Option<[f64; 3]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -295,6 +298,15 @@ impl Camera {
             arr[3].as_float().expect("default_user_crop values must be floats"),
           ]);
         }
+        "camera_calibration" => {
+          let arr = val.as_array().expect("camera_calibration must be an array of 3 floats");
+          assert_eq!(arr.len(), 3, "camera_calibration must have exactly 3 values [r, g, b]");
+          self.camera_calibration = Some([
+            arr[0].as_float().expect("camera_calibration values must be floats"),
+            arr[1].as_float().expect("camera_calibration values must be floats"),
+            arr[2].as_float().expect("camera_calibration values must be floats"),
+          ]);
+        }
         key => {
           panic!("Unknown key: {}", key);
         }
@@ -339,6 +351,7 @@ impl Camera {
       anti_alias_strength: None,
       bayer_green_split: None,
       default_user_crop: None,
+      camera_calibration: None,
       //orientation: Orientation::Unknown,
     }
   }
