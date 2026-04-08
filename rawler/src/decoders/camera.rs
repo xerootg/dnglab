@@ -61,6 +61,9 @@ pub struct Camera {
   /// CameraCalibration: 3x3 diagonal matrix as [r, g, b] scaling factors.
   /// Written as both CameraCalibration1 and CameraCalibration2 DNG tags.
   pub camera_calibration: Option<[f64; 3]>,
+  /// Crop factor relative to 35mm full-frame (diagonal ratio).
+  /// Used to compute FocalLengthIn35mmFormat and FocalPlane resolution tags.
+  pub crop_factor: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -307,6 +310,9 @@ impl Camera {
             arr[2].as_float().expect("camera_calibration values must be floats"),
           ]);
         }
+        "crop_factor" => {
+          self.crop_factor = Some(val.as_float().expect("crop_factor must be a float"));
+        }
         key => {
           panic!("Unknown key: {}", key);
         }
@@ -352,6 +358,7 @@ impl Camera {
       bayer_green_split: None,
       default_user_crop: None,
       camera_calibration: None,
+      crop_factor: None,
       //orientation: Orientation::Unknown,
     }
   }

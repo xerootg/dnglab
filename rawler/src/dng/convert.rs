@@ -255,6 +255,58 @@ where
     ]);
   }
 
+  // Compute missing EXIF APEX values from exposure parameters
+  if metadata.exif.shutter_speed_value.is_none() {
+    if let Some(et) = metadata.exif.exposure_time {
+      let time_sec = et.n as f64 / et.d as f64;
+      if time_sec > 0.0 {
+        let apex = -time_sec.log2();
+        dng.exif_ifd_mut().add_tag(ExifTag::ShutterSpeedValue, SRational::new((apex * 1_000_000.0).round() as i32, 1_000_000));
+      }
+    }
+  }
+  if metadata.exif.aperture_value.is_none() {
+    if let Some(f) = metadata.exif.fnumber {
+      let fnum = f.n as f64 / f.d as f64;
+      if fnum > 0.0 {
+        let apex = 2.0 * fnum.log2();
+        dng.exif_ifd_mut().add_tag(ExifTag::ApertureValue, Rational::new((apex * 1_000_000.0).round() as u32, 1_000_000));
+      }
+    }
+  }
+
+  // Compute FocalLengthIn35mmFormat and FocalPlane resolution from crop_factor
+  if let Some(cf) = rawimage.camera.crop_factor {
+    if metadata.exif.focal_len_in_35mm_format.is_none() {
+      if let Some(fl) = metadata.exif.focal_length {
+        let mm = fl.n as f64 / fl.d as f64;
+        let eq35 = (mm * cf).round() as u16;
+        if eq35 > 0 {
+          dng.exif_ifd_mut().add_tag(ExifTag::FocalLengthIn35mmFormat, eq35);
+        }
+      }
+    }
+
+    let (active_w, active_h) = if let Some(area) = rawimage.active_area {
+      (area.d.w, area.d.h)
+    } else {
+      (rawimage.width, rawimage.height)
+    };
+    if active_w > 0 && active_h > 0 {
+      let diag_35mm: f64 = 43.2666;
+      let sensor_diag = diag_35mm / cf;
+      let pixel_diag = ((active_w as f64).powi(2) + (active_h as f64).powi(2)).sqrt();
+      let sensor_w_mm = sensor_diag * active_w as f64 / pixel_diag;
+      let sensor_h_mm = sensor_diag * active_h as f64 / pixel_diag;
+      // pixels per centimeter
+      let fp_xres = active_w as f64 / sensor_w_mm * 10.0;
+      let fp_yres = active_h as f64 / sensor_h_mm * 10.0;
+      dng.exif_ifd_mut().add_tag(ExifTag::FocalPlaneXResolution2, Rational::new((fp_xres * 100.0).round() as u32, 100));
+      dng.exif_ifd_mut().add_tag(ExifTag::FocalPlaneYResolution2, Rational::new((fp_yres * 100.0).round() as u32, 100));
+      dng.exif_ifd_mut().add_tag(ExifTag::FocalPlaneResolutionUnit2, 3u16); // centimeters
+    }
+  }
+
   // Apply DCP color profile if a profiles directory was provided
   let style_hint = decoder.picture_style_hint();
   if let Some(dcp_dir) = &params.dcp_dir {

@@ -12,6 +12,7 @@ bayer_green_split = 250
 linear_response_limit = 1.0
 anti_alias_strength = 1.0
 camera_calibration = [0.9797, 1.0, 0.9633]
+crop_factor = 2.0
 
 [cameras.color_matrix]
 A = [1.3782, -0.7726, 0.0645, -0.3366, 1.2336, 0.1103, -0.0082, 0.0624, 0.5955]
