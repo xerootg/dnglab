@@ -260,11 +260,15 @@ impl<'a> Decoder for OrfDecoder<'a> {
       img.whitelevel.0.iter_mut().for_each(|level| *level = *level << 2);
     }
 
-    // Override color matrices from MakerNote if available.
-    // Prefer ImageProcessing (0x2040) matrices, fall back to RawInfo (0x3000).
-    if let Some(matrices) = self.get_imgproc_color_matrices().or_else(|| self.get_rawinfo_color_matrices()) {
-      log::info!("ORF: Using color matrices from MakerNote ({} illuminants)", matrices.len());
-      img.color_matrix = matrices;
+    // Only use MakerNote color matrices as a fallback when the TOML camera
+    // definition provides none.  The MakerNote stores a camera-internal color
+    // correction matrix (rows sum to 1.0) which is NOT a DNG ColorMatrix
+    // (XYZ→camera).  The TOML values are the correct DNG-spec matrices.
+    if img.color_matrix.is_empty() {
+      if let Some(matrices) = self.get_imgproc_color_matrices().or_else(|| self.get_rawinfo_color_matrices()) {
+        log::info!("ORF: Using color matrices from MakerNote as fallback ({} illuminants)", matrices.len());
+        img.color_matrix = matrices;
+      }
     }
 
     // Set linearization table from tone curve or DC7 gamma.
@@ -694,11 +698,15 @@ impl<'a> OrfDecoder<'a> {
     match (redmul, bluemul) {
       (Some(redmul), Some(bluemul)) => Ok([redmul.force_u32(0) as f32, 256.0, 256.0, bluemul.force_u32(0) as f32]),
       _ => {
-        let ifd = self.makernote.find_ifds_with_tag(OrfImageProcessing::OrfBlackLevels);
-        if ifd.is_empty() {
-          return Err(RawlerError::DecoderFailed("ORF: Couldn't find ImgProc IFD".to_string()));
-        }
-        let wbs = fetch_tiff_tag!(ifd[0], OrfImageProcessing::WB_RBLevels);
+        // Access the ImageProcessing sub-IFD directly to avoid finding
+        // the wrong IFD (CameraSettingsIFD also has tag 0x0600).
+        let imgproc = self
+          .makernote
+          .get_sub_ifd(OrfMakernotes::ImageProcessingIFD)
+          .ok_or_else(|| RawlerError::DecoderFailed("ORF: Couldn't find ImageProcessing IFD".to_string()))?;
+        let wbs = imgproc
+          .get_entry(OrfImageProcessing::WB_RBLevels)
+          .ok_or_else(|| RawlerError::DecoderFailed("ORF: Couldn't find WB_RBLevels".to_string()))?;
         Ok([wbs.force_f32(0), 256.0, 256.0, wbs.force_f32(1)])
       }
     }
@@ -706,19 +714,19 @@ impl<'a> OrfDecoder<'a> {
 
   /// Read color matrices from the RawInfo sub-IFD (MakerNote → 0x3000).
   ///
-  /// Two 3x3 color correction matrices from RawInfo:
-  /// - Tag 0x0200: first color matrix (ShortArray of 9, scaled by 256)
-  /// - Tag 0x0240: second color matrix (ShortArray of 9, scaled by 256)
+  /// Two 3x3 camera-internal color correction matrices from RawInfo:
+  /// - Tag 0x0200: first color matrix (signed ShortArray of 9, scaled by 256)
+  /// - Tag 0x0240: second color matrix (signed ShortArray of 9, scaled by 256)
   ///
-  /// These are XYZ-to-camera matrices under different illuminants.
-  /// When both are present, they're mapped to A (Tungsten) and D65 (Daylight).
+  /// These are camera-internal matrices (NOT DNG ColorMatrix).
+  /// Only used as a fallback when no TOML camera definition is available.
   fn get_rawinfo_color_matrices(&self) -> Option<HashMap<Illuminant, FlatColorMatrix>> {
     let rawinfo = self.makernote.get_sub_ifd(OrfMakernotes::RawInfo)?;
     let mut matrices: HashMap<Illuminant, FlatColorMatrix> = HashMap::new();
 
     if let Some(entry) = rawinfo.get_entry(OrfRawInfo::ColorMatrix1) {
       if entry.count() >= 9 {
-        let matrix: FlatColorMatrix = (0..9).map(|i| entry.force_u16(i) as f32 / 256.0).collect();
+        let matrix: FlatColorMatrix = (0..9).map(|i| entry.force_i16(i) as f32 / 256.0).collect();
         if matrix.iter().any(|&v| v != 0.0) {
           log::debug!("ORF RawInfo ColorMatrix1 (0x0200): {:?}", matrix);
           matrices.insert(Illuminant::A, matrix);
@@ -728,7 +736,7 @@ impl<'a> OrfDecoder<'a> {
 
     if let Some(entry) = rawinfo.get_entry(OrfRawInfo::ColorMatrix2) {
       if entry.count() >= 9 {
-        let matrix: FlatColorMatrix = (0..9).map(|i| entry.force_u16(i) as f32 / 256.0).collect();
+        let matrix: FlatColorMatrix = (0..9).map(|i| entry.force_i16(i) as f32 / 256.0).collect();
         if matrix.iter().any(|&v| v != 0.0) {
           log::debug!("ORF RawInfo ColorMatrix2 (0x0240): {:?}", matrix);
           matrices.insert(Illuminant::D65, matrix);
@@ -760,7 +768,8 @@ impl<'a> OrfDecoder<'a> {
     for (tag, illuminant) in &tag_illuminant_map {
       if let Some(entry) = imgproc.get_entry(*tag) {
         if entry.count() >= 9 {
-          let matrix: FlatColorMatrix = (0..9).map(|i| entry.force_u16(i) as f32 / 256.0).collect();
+          // Values are signed shorts scaled by 256.
+          let matrix: FlatColorMatrix = (0..9).map(|i| entry.force_i16(i) as f32 / 256.0).collect();
           // Skip identity/zero matrices
           let is_identity_or_zero = matrix.iter().all(|&v| v == 0.0)
             || (matrix == vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
@@ -1068,26 +1077,35 @@ impl<'a> OrfDecoder<'a> {
     let imgproc = self.makernote.get_sub_ifd(OrfMakernotes::ImageProcessingIFD)?;
 
     let entry0 = imgproc.get_entry(OrfImageProcessing::DC7Gamma0)?;
-    if entry0.count() < 2 {
+
+    // DC7 gamma tag is only useful when it contains a LongArray (u32 values).
+    // Some cameras store a proprietary blob (type UNDEFINED, starts with "CMIO")
+    // which cannot be parsed as a simple integer table.
+    let values = match &entry0.value {
+      Value::Long(v) => v,
+      _ => {
+        log::debug!("ORF DC7 gamma tag 0x0635: not a LongArray, skipping");
+        return None;
+      }
+    };
+
+    if values.len() < 2 {
       return None;
     }
 
-    // DC7 gamma data is a LongArray containing a linearization lookup table.
-    // The first entry typically contains the table size or version info.
-    let count = entry0.count() as usize;
+    let count = values.len();
     log::debug!("ORF DC7 gamma tag 0x0635: {} entries", count);
 
     // Build a linearization table from the gamma data.
     // DC7 gamma values are stored as 32-bit unsigned, representing
     // a gamma decompression curve. Convert to 16-bit LUT.
-    let max_val = entry0.force_u32(0);
+    let max_val = values[0];
     if max_val == 0 {
       return None;
     }
 
     let mut table: Vec<u16> = Vec::with_capacity(count);
-    for i in 0..count {
-      let val = entry0.force_u32(i);
+    for &val in values {
       // Scale to 16-bit range
       let scaled = ((val as u64 * 65535) / max_val.max(1) as u64).min(65535) as u16;
       table.push(scaled);

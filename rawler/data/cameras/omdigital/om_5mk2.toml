@@ -8,9 +8,11 @@ active_area = [0, 0, 0, 0]
 crop_area = [12, 12, 24, 12]
 highres_width = 10400
 baseline_exposure = 0.25
-baseline_noise = 1.0
-baseline_sharpness = 1.0
+baseline_noise = 1.5
+baseline_sharpness = 1.5
+bayer_green_split = 250
 linear_response_limit = 1.0
+anti_alias_strength = 1.0
 
 [cameras.color_matrix]
 A = [1.3782, -0.7726, 0.0645, -0.3366, 1.2336, 0.1103, -0.0082, 0.0624, 0.5955]
