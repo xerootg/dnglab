@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DMC-GX80"
 clean_make = "Panasonic"
 clean_model = "DMC-GX80"
+baseline_exposure = 0.0
+baseline_noise = 2.0
+baseline_sharpness = 1.33
 
 model_aliases = [
   ["DMC-GX85", "DMC-GX85"],
@@ -18,3 +21,9 @@ D65 = [0.7771, -0.302, -0.0629, -0.4029, 1.195, 0.2345, -0.0821, 0.1977, 0.6119]
 [[cameras.modes]]
 mode = "4:3"
 active_area = [0, 0, 208, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.4668, 0.3746, 0.1228, 0.2592, 0.7017, 0.0391, 0.1466, 0.0009, 0.6775]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4295, 0.3779, 0.1568, 0.2335, 0.7189, 0.0476, 0.1118, 0.0007, 0.7126]

@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DMC-GM1S"
 clean_make = "Panasonic"
 clean_model = "DMC-GM1S"
+baseline_exposure = 0.0
+baseline_noise = 1.5
+baseline_sharpness = 1.33
 #blackpoint = 143
 whitepoint = 4095
 color_pattern = "BGGR"
@@ -13,3 +16,9 @@ D65 = [0.677, -0.1895, -0.0744, -0.5232, 1.3145, 0.2303, -0.1664, 0.2691, 0.5703
 [[cameras.modes]]
 mode = "4:3"
 active_area = [0, 0, 208, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.4963, 0.3455, 0.1225, 0.3244, 0.6352, 0.0404, 0.2353, 0.0007, 0.589]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4247, 0.361, 0.1787, 0.2442, 0.7005, 0.0553, 0.139, 0.0007, 0.6854]

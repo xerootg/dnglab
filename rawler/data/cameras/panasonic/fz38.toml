@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DMC-FZ38"
 clean_make = "Panasonic"
 clean_model = "DMC-FZ38"
+baseline_exposure = -0.5
+baseline_noise = 4.0
+baseline_sharpness = 1.33
 
 model_aliases = [
   ["DMC-FZ35", "DMC-FZ35"],
@@ -26,3 +29,9 @@ active_area = [0, 0, 42, 4]
 [[cameras.modes]]
 mode = "16:9"
 active_area = [0, 0, 42, 4]
+
+[cameras.forward_matrix.A]
+matrix = [0.6529, 0.0899, 0.2215, 0.2482, 0.8913, -0.1395, -0.1952, -0.8026, 1.8229]
+
+[cameras.forward_matrix.D65]
+matrix = [0.6741, 0.2038, 0.0863, 0.3033, 0.9641, -0.2674, -0.0236, -0.4588, 1.3076]

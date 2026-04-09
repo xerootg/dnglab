@@ -2,6 +2,9 @@ make = "SAMSUNG"
 model = "NX300M"
 clean_make = "Samsung"
 clean_model = "NX300M"
+baseline_exposure = 0.0
+baseline_noise = 1.5
+baseline_sharpness = 1.33
 #blackpoint = 0
 whitepoint = 4095
 color_pattern = "GRBG"
@@ -11,3 +14,9 @@ crop_area = [52, 28, 22, 38]
 [cameras.color_matrix]
 A = [0.8306, -0.3396, -0.0291, -0.4093, 1.1851, 0.254, -0.04, 0.1133, 0.5868]
 D65 = [0.7557, -0.2522, -0.0739, -0.4679, 1.2949, 0.1894, -0.084, 0.1777, 0.5311]
+
+[cameras.forward_matrix.A]
+matrix = [0.6627, 0.1864, 0.1151, 0.2086, 0.8684, -0.077, 0.0208, -0.4069, 1.2113]
+
+[cameras.forward_matrix.D65]
+matrix = [0.6091, 0.3521, 0.0031, 0.2208, 0.9705, -0.1913, 0.0144, -0.1935, 1.0043]

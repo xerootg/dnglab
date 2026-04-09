@@ -2,6 +2,10 @@ make = "KONICA MINOLTA"
 model = "DYNAX 7D"
 clean_make = "Minolta"
 clean_model = "DYNAX 7D"
+baseline_exposure = -0.5
+baseline_noise = 1.33
+baseline_sharpness = 1.33
+bayer_green_split = 500
 blackpoint = 0
 whitepoint = 4095
 color_pattern = "RGGB"
@@ -9,3 +13,9 @@ color_pattern = "RGGB"
 [cameras.color_matrix]
 A = [1.2036, -0.4955, -0.0076, -0.7019, 1.4449, 0.2811, -0.0513, 0.0636, 0.6839]
 D65 = [1.0239, -0.3104, -0.1099, -0.8037, 1.5727, 0.2452, -0.0928, 0.0926, 0.6871]
+
+[cameras.forward_matrix.A]
+matrix = [0.666, 0.274, 0.0243, 0.3306, 0.8194, -0.1499, 0.031, -0.0485, 0.8426]
+
+[cameras.forward_matrix.D65]
+matrix = [0.666, 0.274, 0.0243, 0.3306, 0.8194, -0.1499, 0.031, -0.0485, 0.8426]

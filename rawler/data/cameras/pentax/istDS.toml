@@ -2,6 +2,9 @@ make = "PENTAX Corporation"
 model = "PENTAX *ist DS"
 clean_make = "Pentax"
 clean_model = "*ist DS"
+baseline_exposure = -0.5
+baseline_noise = 1.3
+baseline_sharpness = 1.33
 #blackpoint = 128
 whitepoint = 3950
 color_pattern = "RGGB"
@@ -10,3 +13,9 @@ crop_area = [16, 8, 16, 8]
 
 [cameras.color_matrix]
 D65 = [1.0371, -0.2333, -0.1206, -0.8688, 1.6231, 0.2602, -0.1230, 0.1116, 1.1282]
+
+[cameras.forward_matrix.A]
+matrix = [0.7235, 0.1934, 0.0474, 0.3763, 0.7619, -0.1382, 0.0284, -0.0333, 0.83]
+
+[cameras.forward_matrix.D65]
+matrix = [0.7235, 0.1934, 0.0474, 0.3763, 0.7619, -0.1382, 0.0284, -0.0333, 0.83]

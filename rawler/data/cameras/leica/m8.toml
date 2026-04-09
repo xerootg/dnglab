@@ -5,3 +5,9 @@ clean_model = "M8"
 
 [[cameras.modes]]
 mode = "dng"
+
+[cameras.forward_matrix.A]
+matrix = [0.7408, 0.2977, -0.0743, 0.2976, 0.9167, -0.2143, 0.0645, -0.3383, 1.0989]
+
+[cameras.forward_matrix.D65]
+matrix = [0.7408, 0.2977, -0.0743, 0.2976, 0.9167, -0.2143, 0.0645, -0.3383, 1.0989]

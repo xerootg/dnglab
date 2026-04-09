@@ -5,3 +5,9 @@ clean_model = "SL2"
 
 [[cameras.modes]]
 mode = "dng"
+
+[cameras.forward_matrix.A]
+matrix = [0.5061, 0.3831, 0.075, 0.2309, 0.7483, 0.0208, 0.049, 0.0003, 0.7758]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4537, 0.4034, 0.1072, 0.2156, 0.7532, 0.0312, 0.0531, 0.0006, 0.7713]

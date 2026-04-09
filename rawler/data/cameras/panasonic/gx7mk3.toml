@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DC-GX7MK3"
 clean_make = "Panasonic"
 clean_model = "DC-GX7 III"
+baseline_exposure = 0.25
+baseline_noise = 2.0
+baseline_sharpness = 1.33
 #blackpoint = 143
 whitepoint = 4095
 color_pattern = "BGGR"
@@ -25,3 +28,9 @@ active_area = [0, 0, 208, 0]
 [[cameras.modes]]
 mode = "16:9"
 active_area = [0, 0, 208, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.5436, 0.2948, 0.1259, 0.2652, 0.6982, 0.0366, 0.1699, 0.0006, 0.6546]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4839, 0.3135, 0.1669, 0.2473, 0.701, 0.0517, 0.1296, 0.0018, 0.6937]

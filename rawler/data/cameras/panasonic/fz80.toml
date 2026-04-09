@@ -2,6 +2,10 @@ make = "Panasonic"
 model = "DC-FZ80"
 clean_make = "Panasonic"
 clean_model = "DC-FZ80"
+baseline_exposure = -0.5
+baseline_noise = 4.0
+baseline_sharpness = 2.0
+bayer_green_split = 500
 
 model_aliases = [
   ["DC-FZ80D", "DC-FZ80D"],

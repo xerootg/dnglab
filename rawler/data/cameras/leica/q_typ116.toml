@@ -5,3 +5,9 @@ clean_model = "Q (Typ 116)"
 
 [[cameras.modes]]
 mode = "dng"
+
+[cameras.forward_matrix.A]
+matrix = [0.5556, 0.3021, 0.1066, 0.3399, 0.6049, 0.0552, 0.1718, 0.0002, 0.6531]
+
+[cameras.forward_matrix.D65]
+matrix = [0.454, 0.3878, 0.1225, 0.2096, 0.755, 0.0354, 0.0546, 0.0012, 0.7692]

@@ -2,6 +2,10 @@ make = "NIKON"
 model = "COOLPIX P7800"
 clean_make = "Nikon"
 clean_model = "Coolpix P7800"
+baseline_exposure = -0.25
+baseline_noise = 4.0
+baseline_sharpness = 1.33
+bayer_green_split = 500
 
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]

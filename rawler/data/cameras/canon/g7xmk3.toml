@@ -2,6 +2,9 @@ make = "Canon"
 model = "Canon PowerShot G7 X Mark III"
 clean_make = "Canon"
 clean_model = "PowerShot G7 X Mark III"
+baseline_exposure = 0.35
+baseline_noise = 1.0
+baseline_sharpness = 1.33
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

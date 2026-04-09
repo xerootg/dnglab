@@ -2,6 +2,9 @@ make = "Canon"
 model = "Canon EOS 250D"
 clean_make = "Canon"
 clean_model = "EOS 250D"
+baseline_exposure = 0.4
+baseline_noise = 1.0
+baseline_sharpness = 1.25
 color_pattern = "RGGB"
 
 model_aliases = [

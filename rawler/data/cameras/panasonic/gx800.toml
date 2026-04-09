@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DC-GX800"
 clean_make = "Panasonic"
 clean_model = "DC-GX800"
+baseline_exposure = 0.0
+baseline_noise = 1.5
+baseline_sharpness = 1.33
 
 model_aliases = [
   ["DC-GX850", "DC-GX850"],
@@ -18,3 +21,9 @@ D65 = [0.761, -0.278, -0.0576, -0.4614, 1.2195, 0.2733, -0.1375, 0.2393, 0.649]
 [[cameras.modes]]
 mode = "4:3"
 active_area = [0, 0, 208, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.7978, 0.1352, 0.0313, 0.288, 0.7119, 0.0001, 0, 0, 0.8251]
+
+[cameras.forward_matrix.D65]
+matrix = [0.7978, 0.1352, 0.0313, 0.288, 0.7119, 0.0001, 0, 0, 0.8251]

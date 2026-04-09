@@ -2,6 +2,9 @@ make = "FUJIFILM"
 model = "X100VI"
 clean_make = "Fujifilm"
 clean_model = "X100VI"
+baseline_exposure = -0.2
+baseline_noise = 1.0
+baseline_sharpness = 1.1
 whitepoint = 16383
 active_area = [0, 12, 120, 12]
 

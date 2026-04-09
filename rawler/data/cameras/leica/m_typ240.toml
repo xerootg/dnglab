@@ -5,3 +5,9 @@ clean_model = "M (Typ 240)"
 
 [[cameras.modes]]
 mode = "dng"
+
+[cameras.forward_matrix.A]
+matrix = [0.693, 0.077, 0.1943, 0.1983, 0.7456, 0.0561, -0.012, -0.5291, 1.3663]
+
+[cameras.forward_matrix.D65]
+matrix = [0.6286, 0.2743, 0.0613, 0.1958, 0.8539, -0.0496, 0.0006, -0.2075, 1.032]

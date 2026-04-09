@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DMC-TZ71"
 clean_make = "Panasonic"
 clean_model = "DMC-TZ71"
+baseline_exposure = -0.5
+baseline_noise = 4.0
+baseline_sharpness = 2.0
 #blackpoint = 142
 whitepoint = 3956
 color_pattern = "RGGB"
@@ -25,3 +28,9 @@ active_area = [0, 0, 128, 0]
 [[cameras.modes]]
 mode = "16:9"
 active_area = [0, 0, 128, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.4355, 0.4002, 0.1286, 0.208, 0.7518, 0.0402, 0.1147, 0.0001, 0.7104]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4179, 0.3874, 0.159, 0.199, 0.7531, 0.0479, 0.0927, 0.005, 0.7274]

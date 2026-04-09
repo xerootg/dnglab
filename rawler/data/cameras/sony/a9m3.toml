@@ -2,6 +2,9 @@ make = "SONY"
 model = "ILCE-9M3"
 clean_make = "Sony"
 clean_model = "ILCE-9M3"
+baseline_exposure = 0.25
+baseline_noise = 0.6
+baseline_sharpness = 1.33
 color_pattern = "RGGB"
 bps = 8
 

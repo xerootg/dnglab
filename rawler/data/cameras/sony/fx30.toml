@@ -2,6 +2,9 @@ make = "SONY"
 model = "ILME-FX30"
 clean_make = "Sony"
 clean_model = "ILME-FX30"
+baseline_exposure = 0.1
+baseline_noise = 0.6
+baseline_sharpness = 1.25
 color_pattern = "RGGB"
 bps = 8
 

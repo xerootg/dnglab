@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DMC-FZ2500"
 clean_make = "Panasonic"
 clean_model = "DMC-FZ2500"
+baseline_exposure = 0.0
+baseline_noise = 3.0
+baseline_sharpness = 1.33
 
 model_aliases = [
   ["DMC-FZ2000", "DMC-FZ2000"],

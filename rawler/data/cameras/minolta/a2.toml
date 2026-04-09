@@ -2,6 +2,9 @@ make = "Konica Minolta Camera, Inc."
 model = "DiMAGE A2"
 clean_make = "Minolta"
 clean_model = "DiMAGE A2"
+baseline_exposure = -0.5
+baseline_noise = 4.0
+baseline_sharpness = 1.33
 blackpoint = 0
 whitepoint = 3965
 color_pattern = "RGGB"
@@ -10,3 +13,9 @@ active_area = [0, 0, 0, 0]
 [cameras.color_matrix]
 A = [1.0002, -0.3955, -0.0245, -0.6658, 1.3766, 0.3218, -0.0589, 0.074, 0.7797]
 D65 = [0.9097, -0.2726, -0.1052, -0.8074, 1.5506, 0.2762, -0.0966, 0.0982, 0.7763]
+
+[cameras.forward_matrix.A]
+matrix = [0.66, 0.2774, 0.027, 0.3334, 0.8395, -0.1728, 0.0272, -0.0467, 0.8446]
+
+[cameras.forward_matrix.D65]
+matrix = [0.66, 0.2774, 0.027, 0.3334, 0.8395, -0.1728, 0.0272, -0.0467, 0.8446]

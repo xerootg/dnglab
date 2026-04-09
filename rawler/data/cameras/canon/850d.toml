@@ -6,6 +6,9 @@ model_aliases = [
 ]
 clean_make = "Canon"
 clean_model = "EOS 850D"
+baseline_exposure = 0.0
+baseline_noise = 1.2
+baseline_sharpness = 1.25
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

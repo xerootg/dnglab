@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DC-S1M2ES"
 clean_make = "Panasonic"
 clean_model = "DC-S1M2ES"
+baseline_exposure = 0.05
+baseline_noise = 1.5
+baseline_sharpness = 1.33
 whitepoint = 16383
 color_pattern = "RGGB"
 

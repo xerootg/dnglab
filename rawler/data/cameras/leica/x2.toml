@@ -5,3 +5,9 @@ clean_model = "X2"
 
 [[cameras.modes]]
 mode = "dng"
+
+[cameras.forward_matrix.A]
+matrix = [0.6631, 0.2424, 0.0588, 0.1959, 0.9413, -0.1372, 0.0392, -0.2828, 1.0687]
+
+[cameras.forward_matrix.D65]
+matrix = [0.6207, 0.4089, -0.0653, 0.2247, 1.0864, -0.3112, 0.0235, -0.1538, 0.9554]

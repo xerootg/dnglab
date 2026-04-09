@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DC-GH6"
 clean_make = "Panasonic"
 clean_model = "DC-GH6"
+baseline_exposure = 0.0
+baseline_noise = 1.3
+baseline_sharpness = 1.25
 whitepoint = 65535
 color_pattern = "RGGB"
 

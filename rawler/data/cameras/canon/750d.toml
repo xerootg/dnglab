@@ -2,6 +2,9 @@ make = "Canon"
 model = "Canon EOS 750D"
 clean_make = "Canon"
 clean_model = "EOS 750D"
+baseline_exposure = 0.25
+baseline_noise = 1.0
+baseline_sharpness = 1.2
 
 model_aliases = [
   ["Canon EOS Rebel T6i", "EOS Rebel T6i"],

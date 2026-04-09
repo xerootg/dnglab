@@ -2,6 +2,10 @@ make = "SONY"
 model = "ZV-1"
 clean_make = "Sony"
 clean_model = "ZV-1"
+baseline_exposure = -0.2
+baseline_noise = 3.0
+baseline_sharpness = 1.33
+bayer_green_split = 500
 
 model_aliases = [
   ["ZV-1A", "ZV-1A"],
@@ -17,3 +21,9 @@ bps = 8
 [cameras.color_matrix]
 A = [1.014, -0.5797, 0.0815, -0.2925, 1.0962, 0.2252, 0.0042, 0.0642, 0.6456]
 D65 = [0.828, -0.2987, -0.0703, -0.3531, 1.1645, 0.2133, -0.055, 0.1542, 0.5312]
+
+[cameras.forward_matrix.A]
+matrix = [0.4295, 0.4377, 0.0972, 0.1637, 0.8111, 0.0252, 0.051, 0.0014, 0.7728]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4554, 0.3501, 0.1588, 0.2403, 0.7119, 0.0478, 0.1184, 0.0033, 0.7035]

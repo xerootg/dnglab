@@ -2,6 +2,10 @@ make = "Panasonic"
 model = "DMC-FZ72"
 clean_make = "Panasonic"
 clean_model = "DMC-FZ72"
+baseline_exposure = -0.5
+baseline_noise = 4.0
+baseline_sharpness = 2.0
+bayer_green_split = 500
 #blackpoint = 144
 whitepoint = 3956
 color_pattern = "RGGB"
@@ -25,3 +29,9 @@ active_area = [0, 0, 182, 0]
 [[cameras.modes]]
 mode = "16:9"
 active_area = [0, 0, 182, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.7978, 0.1352, 0.0313, 0.288, 0.7119, 0.0001, 0, 0, 0.8251]
+
+[cameras.forward_matrix.D65]
+matrix = [0.7978, 0.1352, 0.0313, 0.288, 0.7119, 0.0001, 0, 0, 0.8251]

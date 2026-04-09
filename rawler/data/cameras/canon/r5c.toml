@@ -2,6 +2,9 @@ make = "Canon"
 model = "Canon EOS R5 C"
 clean_make = "Canon"
 clean_model = "EOS R5 C"
+baseline_exposure = 0.75
+baseline_noise = 0.8
+baseline_sharpness = 1.25
 color_pattern = "RGGB"
 remark = "support for CRM raw movie frame extraction"
 

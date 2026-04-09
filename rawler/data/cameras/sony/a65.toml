@@ -2,6 +2,9 @@ make = "SONY"
 model = "SLT-A65"
 clean_make = "Sony"
 clean_model = "SLT-A65"
+baseline_exposure = 0.35
+baseline_noise = 2.0
+baseline_sharpness = 1.33
 
 model_aliases = [
   ["SLT-A65V", "SLT-A65V"],

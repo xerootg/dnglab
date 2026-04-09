@@ -2,6 +2,9 @@ make = "FUJIFILM"
 model = "X-T30 III"
 clean_make = "Fujifilm"
 clean_model = "X-T30 III"
+baseline_exposure = -0.15
+baseline_noise = 1.0
+baseline_sharpness = 1.1
 color_pattern = "GGRGGBGGBGGRBRGRBGGGBGGRGGRGGBRBGBRG"
 active_area = [0, 5, 84, 1] # TODO: for crop, the area differs
 

@@ -2,6 +2,9 @@ make = "FUJIFILM"
 model = "GFX 50S"
 clean_make = "Fujifilm"
 clean_model = "GFX 50S"
+baseline_exposure = 0.0
+baseline_noise = 1.0
+baseline_sharpness = 1.9
 color_pattern = "RGGB"
 active_area = [0, 0, 936, 2]
 

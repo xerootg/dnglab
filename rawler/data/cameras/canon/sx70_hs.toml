@@ -2,6 +2,9 @@ make = "Canon"
 model = "Canon PowerShot SX70 HS"
 clean_make = "Canon"
 clean_model = "PowerShot SX70 HS"
+baseline_exposure = 0.4
+baseline_noise = 3.0
+baseline_sharpness = 1.33
 color_pattern = "RGGB"
 
 [cameras.params]

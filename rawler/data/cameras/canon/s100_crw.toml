@@ -7,6 +7,10 @@ color_pattern = "GBRG"
 blackareav = [0, 100]
 blackareah = [3062, 60]
 filesize = 19493760
+baseline_exposure = 0.0
+baseline_noise = 3.0
+baseline_sharpness = 1.33
+bayer_green_split = 100
 raw_width = 4160
 raw_height = 3124
 

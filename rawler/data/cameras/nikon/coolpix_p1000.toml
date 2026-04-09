@@ -2,6 +2,9 @@ make = "NIKON CORPORATION"
 model = "COOLPIX P1000"
 clean_make = "Nikon"
 clean_model = "Coolpix P1000"
+baseline_exposure = -0.3
+baseline_noise = 1.0
+baseline_sharpness = 1.25
 
 model_aliases = [
   ["COOLPIX P1100", "Coolpix P1100"],

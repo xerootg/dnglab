@@ -11,6 +11,7 @@ highres_width = 9280
 baseline_noise = 1.5
 baseline_sharpness = 1.5
 bayer_green_split = 250
+baseline_exposure = 0.0
 
 [cameras.color_matrix]
 A = [1.3782, -0.7726, 0.0645, -0.3366, 1.2336, 0.1103, -0.0082, 0.0624, 0.5955]

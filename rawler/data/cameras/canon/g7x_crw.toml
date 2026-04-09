@@ -6,6 +6,9 @@ blackpoint = 511
 whitepoint = 4000
 color_pattern = "RGGB"
 filesize = 31342080
+baseline_exposure = 0.05
+baseline_noise = 1.0
+baseline_sharpness = 1.33
 raw_width = 5632
 raw_height = 3710
 

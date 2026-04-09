@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DC-TZ90"
 clean_make = "Panasonic"
 clean_model = "DC-TZ90"
+baseline_exposure = -0.5
+baseline_noise = 4.0
+baseline_sharpness = 2.0
 
 model_aliases = [
   ["DC-TZ91", "DC-TZ91"],
@@ -21,3 +24,9 @@ D65 = [0.9052, -0.3117, -0.0883, -0.3045, 1.1346, 0.1927, -0.0205, 0.152, 0.473]
 [[cameras.modes]]
 mode = "4:3"
 active_area = [0, 0, 64, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.4664, 0.3628, 0.1351, 0.2488, 0.7114, 0.0398, 0.1065, 0.0015, 0.7171]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4208, 0.3698, 0.1737, 0.2022, 0.745, 0.0528, 0.0809, 0.0048, 0.7394]

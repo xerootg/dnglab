@@ -2,6 +2,9 @@ make = "FUJIFILM"
 model = "FinePix S6500fd"
 clean_make = "Fujifilm"
 clean_model = "FinePix S6500fd"
+baseline_exposure = -0.5
+baseline_noise = 3.5
+baseline_sharpness = 2.0
 
 model_aliases = [
   ["FinePix S6000fd", "FinePix S6000fd"],

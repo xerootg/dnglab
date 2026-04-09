@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DMC-FZ45"
 clean_make = "Panasonic"
 clean_model = "DMC-FZ45"
+baseline_exposure = -0.5
+baseline_noise = 4.0
+baseline_sharpness = 2.0
 #blackpoint = 143
 whitepoint = 3986
 color_pattern = "GBRG"
@@ -29,3 +32,9 @@ active_area = [0, 0, 0, 0]
 [[cameras.modes]]
 mode = "16:9"
 active_area = [0, 0, 0, 0]
+
+[cameras.forward_matrix.A]
+matrix = [0.5148, 0.3722, 0.0773, 0.0364, 1.1818, -0.2182, -0.2686, -0.4722, 1.566]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4968, 0.5575, -0.09, 0.1128, 1.3022, -0.415, -0.0508, -0.286, 1.1619]

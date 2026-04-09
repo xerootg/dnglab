@@ -2,6 +2,9 @@ make = "Canon"
 model = "Canon EOS R50"
 clean_make = "Canon"
 clean_model = "EOS R50"
+baseline_exposure = 0.66
+baseline_noise = 0.8
+baseline_sharpness = 1.2
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

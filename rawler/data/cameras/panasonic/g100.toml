@@ -2,6 +2,9 @@ make = "Panasonic"
 model = "DC-G100"
 clean_make = "Panasonic"
 clean_model = "DC-G100"
+baseline_exposure = 0.25
+baseline_noise = 1.5
+baseline_sharpness = 1.33
 
 model_aliases = [
   ["DC-G100D", "DC-G100D"],

@@ -2,6 +2,9 @@ make = "Canon"
 model = "Canon EOS RP"
 clean_make = "Canon"
 clean_model = "EOS RP"
+baseline_exposure = 0.5
+baseline_noise = 0.8
+baseline_sharpness = 1.25
 color_pattern = "RGGB"
 hints = ["bogus_blackarea"]
 

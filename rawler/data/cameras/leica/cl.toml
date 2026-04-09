@@ -5,3 +5,9 @@ clean_model = "CL"
 
 [[cameras.modes]]
 mode = "dng"
+
+[cameras.forward_matrix.A]
+matrix = [0.4794, 0.3451, 0.1398, 0.2421, 0.7147, 0.0431, 0.1316, 0.0012, 0.6923]
+
+[cameras.forward_matrix.D65]
+matrix = [0.4194, 0.3579, 0.1871, 0.2215, 0.7204, 0.0581, 0.1003, 0.0044, 0.7204]

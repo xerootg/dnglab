@@ -11,6 +11,7 @@ crop_area = [8, 7, 8, 7]
 baseline_noise = 3.0
 baseline_sharpness = 1.33
 bayer_green_split = 250
+baseline_exposure = 0.0
 
 [cameras.color_matrix]
 A = [1.0013, -0.4366, 0.0358, -0.2138, 0.953, 0.3068, -0.0064, 0.0872, 0.5399]
