@@ -259,9 +259,15 @@ impl Camera {
           if let Some(forward_matrix) = val.as_table() {
             for (illu_str, matrix) in forward_matrix.into_iter() {
               let illu = Illuminant::new_from_str(illu_str).unwrap();
-              let mat = matrix
-                .as_array()
-                .expect("forward matrix must be array")
+              // Support both flat format (A = [...]) and nested table format (A = { matrix = [...] })
+              let arr = if let Some(arr) = matrix.as_array() {
+                arr
+              } else if let Some(tbl) = matrix.as_table() {
+                tbl.get("matrix").and_then(|v| v.as_array()).expect("forward matrix table must contain 'matrix' array")
+              } else {
+                panic!("forward matrix entry must be an array or a table with a 'matrix' key");
+              };
+              let mat = arr
                 .iter()
                 .map(|a| a.as_float().expect("forward matrix values must be float") as f32)
                 .collect();
