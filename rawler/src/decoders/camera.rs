@@ -1,6 +1,11 @@
 use toml::Value;
 
 use crate::CFA;
+
+/// Extract a float from a TOML value, accepting both float and integer types.
+fn toml_as_f64(val: &Value) -> Option<f64> {
+  val.as_float().or_else(|| val.as_integer().map(|i| i as f64))
+}
 use crate::cfa::PlaneColor;
 use crate::imgop::xyz::FlatColorMatrix;
 use crate::imgop::xyz::Illuminant;
@@ -170,7 +175,7 @@ impl Camera {
                 .as_array()
                 .expect("color matrix must be array")
                 .iter()
-                .map(|a| a.as_float().expect("color matrix values must be float") as f32)
+                .map(|a| toml_as_f64(a).expect("color matrix values must be numeric") as f32)
                 .collect();
               self.color_matrix.insert(illu, xyz_to_cam);
             }
@@ -269,30 +274,30 @@ impl Camera {
               };
               let mat = arr
                 .iter()
-                .map(|a| a.as_float().expect("forward matrix values must be float") as f32)
+                .map(|a| toml_as_f64(a).expect("forward matrix values must be numeric") as f32)
                 .collect();
               self.forward_matrix.insert(illu, mat);
             }
           }
         }
         n @ "baseline_exposure" => {
-          self.baseline_exposure = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+          self.baseline_exposure = Some(toml_as_f64(val).unwrap_or_else(|| panic!("{} must be numeric", n)) as f32);
         }
         n @ "baseline_noise" => {
-          self.baseline_noise = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+          self.baseline_noise = Some(toml_as_f64(val).unwrap_or_else(|| panic!("{} must be numeric", n)) as f32);
         }
         n @ "baseline_sharpness" => {
-          self.baseline_sharpness = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+          self.baseline_sharpness = Some(toml_as_f64(val).unwrap_or_else(|| panic!("{} must be numeric", n)) as f32);
         }
         n @ "linear_response_limit" => {
-          self.linear_response_limit = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+          self.linear_response_limit = Some(toml_as_f64(val).unwrap_or_else(|| panic!("{} must be numeric", n)) as f32);
         }
         "noise_profile" => {
           let arr = val.as_array().expect("noise_profile must be an array of floats");
-          self.noise_profile = Some(arr.iter().map(|v| v.as_float().expect("noise_profile values must be floats")).collect());
+          self.noise_profile = Some(arr.iter().map(|v| toml_as_f64(v).expect("noise_profile values must be numeric")).collect());
         }
         n @ "anti_alias_strength" => {
-          self.anti_alias_strength = Some(val.as_float().unwrap_or_else(|| panic!("{} must be a float", n)) as f32);
+          self.anti_alias_strength = Some(toml_as_f64(val).unwrap_or_else(|| panic!("{} must be numeric", n)) as f32);
         }
         n @ "bayer_green_split" => {
           self.bayer_green_split = Some(val.as_integer().unwrap_or_else(|| panic!("{} must be an integer", n)) as u32);
@@ -301,23 +306,23 @@ impl Camera {
           let arr = val.as_array().expect("default_user_crop must be an array of 4 floats");
           assert_eq!(arr.len(), 4, "default_user_crop must have exactly 4 values");
           self.default_user_crop = Some([
-            arr[0].as_float().expect("default_user_crop values must be floats"),
-            arr[1].as_float().expect("default_user_crop values must be floats"),
-            arr[2].as_float().expect("default_user_crop values must be floats"),
-            arr[3].as_float().expect("default_user_crop values must be floats"),
+            toml_as_f64(&arr[0]).expect("default_user_crop values must be numeric"),
+            toml_as_f64(&arr[1]).expect("default_user_crop values must be numeric"),
+            toml_as_f64(&arr[2]).expect("default_user_crop values must be numeric"),
+            toml_as_f64(&arr[3]).expect("default_user_crop values must be numeric"),
           ]);
         }
         "camera_calibration" => {
           let arr = val.as_array().expect("camera_calibration must be an array of 3 floats");
           assert_eq!(arr.len(), 3, "camera_calibration must have exactly 3 values [r, g, b]");
           self.camera_calibration = Some([
-            arr[0].as_float().expect("camera_calibration values must be floats"),
-            arr[1].as_float().expect("camera_calibration values must be floats"),
-            arr[2].as_float().expect("camera_calibration values must be floats"),
+            toml_as_f64(&arr[0]).expect("camera_calibration values must be numeric"),
+            toml_as_f64(&arr[1]).expect("camera_calibration values must be numeric"),
+            toml_as_f64(&arr[2]).expect("camera_calibration values must be numeric"),
           ]);
         }
         "crop_factor" => {
-          self.crop_factor = Some(val.as_float().expect("crop_factor must be a float"));
+          self.crop_factor = Some(toml_as_f64(val).expect("crop_factor must be numeric"));
         }
         key => {
           panic!("Unknown key: {}", key);
