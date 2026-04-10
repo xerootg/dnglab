@@ -58,6 +58,18 @@ impl DcpProfile {
       .get_entry(DngTag::ProfileName)
       .and_then(|e| e.value.as_string().cloned())
   }
+
+  /// Returns the `BaselineExposureOffset` from the DCP as an f64 EV value.
+  ///
+  /// Adobe bakes this offset into the output DNG's `BaselineExposure` tag
+  /// rather than writing a separate `BaselineExposureOffset` tag.
+  pub fn baseline_exposure_offset(&self) -> Option<f64> {
+    self.ifd.get_entry(DngTag::BaselineExposureOffset).and_then(|e| match &e.value {
+      Value::SRational(v) if !v.is_empty() && v[0].d != 0 => Some(v[0].n as f64 / v[0].d as f64),
+      Value::Rational(v) if !v.is_empty() && v[0].d != 0 => Some(v[0].n as f64 / v[0].d as f64),
+      _ => None,
+    })
+  }
 }
 
 /// Tags from a DCP that we propagate into the output DNG root IFD.
@@ -214,4 +226,92 @@ pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str, picture_style: Option
   }
 
   None
+}
+
+/// Automatically discover a DCP profile for the given camera model.
+///
+/// This searches for profiles in the following order:
+/// 1. The `DNGLAB_DCP_DIR` environment variable (if set).
+/// 2. Standard Adobe CameraRaw system directories.
+///
+/// Returns the loaded profile if found.
+pub fn auto_find_dcp(unique_camera_model: &str, picture_style: Option<&str>) -> Option<PathBuf> {
+  // 1. Environment variable override
+  if let Ok(env_dir) = std::env::var("DNGLAB_DCP_DIR") {
+    let dir = PathBuf::from(&env_dir);
+    if dir.is_dir() {
+      if let Some(path) = find_dcp(&dir, unique_camera_model, picture_style) {
+        return Some(path);
+      }
+    }
+  }
+
+  // 2. Standard Adobe CameraRaw paths
+  for dir in system_dcp_dirs() {
+    if dir.is_dir() {
+      if let Some(path) = find_dcp(&dir, unique_camera_model, picture_style) {
+        return Some(path);
+      }
+    }
+  }
+
+  None
+}
+
+/// Returns the platform-specific standard directories where Adobe stores
+/// DCP camera profiles.
+fn system_dcp_dirs() -> Vec<PathBuf> {
+  let mut dirs = Vec::new();
+
+  #[cfg(target_os = "linux")]
+  {
+    // Adobe DNG Converter installed via Wine or native
+    if let Ok(home) = std::env::var("HOME") {
+      // darktable camera profiles (common community path)
+      dirs.push(PathBuf::from(format!("{}/.local/share/darktable/color/out", home)));
+      // Wine-installed Adobe DNG Converter
+      dirs.push(PathBuf::from(format!(
+        "{}/.wine/drive_c/ProgramData/Adobe/CameraRaw/CameraProfiles",
+        home
+      )));
+      dirs.push(PathBuf::from(format!(
+        "{}/.wine/drive_c/Program Files/Adobe/Adobe DNG Converter/CameraProfiles",
+        home
+      )));
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  {
+    dirs.push(PathBuf::from(
+      "/Library/Application Support/Adobe/CameraRaw/CameraProfiles",
+    ));
+    if let Ok(home) = std::env::var("HOME") {
+      dirs.push(PathBuf::from(format!(
+        "{}/Library/Application Support/Adobe/CameraRaw/CameraProfiles",
+        home
+      )));
+    }
+  }
+
+  #[cfg(target_os = "windows")]
+  {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+      dirs.push(PathBuf::from(format!(
+        "{}/Adobe/CameraRaw/CameraProfiles",
+        appdata
+      )));
+    }
+    if let Ok(programdata) = std::env::var("ProgramData") {
+      dirs.push(PathBuf::from(format!(
+        "{}/Adobe/CameraRaw/CameraProfiles",
+        programdata
+      )));
+    }
+    dirs.push(PathBuf::from(
+      "C:/Program Files/Adobe/Adobe DNG Converter/CameraProfiles",
+    ));
+  }
+
+  dirs
 }

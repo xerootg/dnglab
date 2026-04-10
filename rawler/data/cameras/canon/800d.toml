@@ -5,6 +5,7 @@ clean_model = "EOS 800D"
 baseline_exposure = 0.0
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [2.1337890625, 1.546875]
 
 model_aliases = [
   ["Canon EOS REBEL T7i", "EOS Rebel T7i"],

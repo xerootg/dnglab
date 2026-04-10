@@ -5,6 +5,7 @@ clean_model = "ILCA-68"
 baseline_exposure = 0.35
 baseline_noise = 2.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.63671875, 1.6171875]
 ##blackpoint = 512
 #whitepoint = 16300
 color_pattern = "RGGB"

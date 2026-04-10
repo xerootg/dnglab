@@ -5,6 +5,7 @@ clean_model = "EOS-1D Mark III"
 baseline_exposure = 0.35
 baseline_noise = 0.75
 baseline_sharpness = 1.0
+cc_reference_wb = [1.8856304985, 1.4565004888]
 whitepoint = 15100
 color_pattern = "RGGB"
 blackareav = [2, 74]

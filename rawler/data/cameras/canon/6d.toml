@@ -5,6 +5,7 @@ clean_model = "EOS 6D"
 baseline_exposure = 0.25
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [2.00390625, 1.58984375]
 color_pattern = "RGGB"
 blackareav = [0, 68]
 blackareah = [2, 36]

@@ -5,6 +5,7 @@ clean_model = "ILCE-7"
 baseline_exposure = 0.35
 baseline_noise = 0.6
 baseline_sharpness = 1.33
+cc_reference_wb = [2.37890625, 1.421875]
 bayer_green_split = 250
 ##blackpoint = 512
 #whitepoint = 16300

@@ -5,6 +5,7 @@ clean_model = "EOS 60D"
 baseline_exposure = 0.0
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [1.50390625, 1.283203125]
 color_pattern = "GBRG"
 real_bps = 14
 active_area = [142,51,0,0]

@@ -5,6 +5,7 @@ clean_model = "EOS 5DS"
 baseline_exposure = 0.25
 baseline_noise = 0.8
 baseline_sharpness = 1.2
+cc_reference_wb = [2.1513671875, 1.6572265625]
 bayer_green_split = 100
 color_pattern = "RGGB"
 blackareav = [0, 150]

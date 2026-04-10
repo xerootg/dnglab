@@ -5,6 +5,7 @@ clean_model = "EOS 7D Mark II"
 baseline_exposure = 0.15
 baseline_noise = 0.8
 baseline_sharpness = 1.2
+cc_reference_wb = [1.9765625, 1.625]
 bayer_green_split = 100
 color_pattern = "RGGB"
 blackareav = [4, 64]

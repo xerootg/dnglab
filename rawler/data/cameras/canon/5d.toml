@@ -5,6 +5,7 @@ clean_model = "EOS 5D"
 baseline_exposure = 0.25
 baseline_noise = 1.0
 baseline_sharpness = 1.5
+cc_reference_wb = [1.2685546875, 1.66796875]
 color_pattern = "RGGB"
 active_area = [90,34,0,0]
 blackareav = [0, 88]

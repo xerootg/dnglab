@@ -5,6 +5,7 @@ clean_model = "PowerShot S100"
 baseline_exposure = 0.0
 baseline_noise = 3.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.1708984375, 1.751953125]
 bayer_green_split = 100
 whitepoint = 4000
 color_pattern = "GBRG"

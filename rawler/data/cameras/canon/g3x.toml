@@ -5,6 +5,7 @@ clean_model = "PowerShot G3 X"
 baseline_exposure = 0.05
 baseline_noise = 1.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.0124013529, 1.7587373168]
 whitepoint = 16000
 color_pattern = "RGGB"
 blackareav = [0, 90]

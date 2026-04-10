@@ -5,6 +5,7 @@ clean_model = "ILCE-1"
 baseline_exposure = 0.15
 baseline_noise = 0.6
 baseline_sharpness = 1.33
+cc_reference_wb = [2.3720703125, 1.5693359375]
 ##blackpoint = 512
 #whitepoint = 16300
 color_pattern = "RGGB"

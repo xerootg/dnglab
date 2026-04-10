@@ -5,6 +5,7 @@ clean_model = "DSLR-A390"
 baseline_exposure = 0.0
 baseline_noise = 1.2
 baseline_sharpness = 1.0
+cc_reference_wb = [2.5, 1.6875]
 bayer_green_split = 10000
 ##blackpoint = 0
 #whitepoint = 4095

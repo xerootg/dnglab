@@ -5,6 +5,7 @@ clean_model = "EOS 80D"
 baseline_exposure = 0.0
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [2.0234375, 1.3974609375]
 color_pattern = "RGGB"
 real_bps = 14
 active_area = [264,34,2,0]

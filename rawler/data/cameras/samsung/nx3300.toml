@@ -5,6 +5,7 @@ clean_model = "NX3300"
 baseline_exposure = -0.1
 baseline_noise = 1.5
 baseline_sharpness = 1.33
+cc_reference_wb = [1.625, 2.28515625]
 #blackpoint = 0
 whitepoint = 4095
 color_pattern = "GRBG"

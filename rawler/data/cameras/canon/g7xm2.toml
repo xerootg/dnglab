@@ -5,6 +5,7 @@ clean_model = "PowerShot G7 X Mark II"
 baseline_exposure = 0.33
 baseline_noise = 1.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.7824377457, 1.9266055046]
 color_pattern = "RGGB"
 active_area = [96, 17, 0, 0]
 blackareav = [0, 70]

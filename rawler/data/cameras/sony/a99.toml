@@ -5,6 +5,7 @@ clean_model = "SLT-A99"
 baseline_exposure = 0.4
 baseline_noise = 0.6
 baseline_sharpness = 1.33
+cc_reference_wb = [2.359375, 1.44140625]
 
 model_aliases = [
   ["SLT-A99V", "SLT-A99V"],

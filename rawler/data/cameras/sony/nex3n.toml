@@ -5,6 +5,7 @@ clean_model = "NEX-3N"
 baseline_exposure = 0.35
 baseline_noise = 1.5
 baseline_sharpness = 1.2
+cc_reference_wb = [2.48046875, 1.53515625]
 ##blackpoint = 512
 #whitepoint = 16300
 color_pattern = "RGGB"

@@ -5,6 +5,7 @@ clean_model = "ZV-E1"
 baseline_exposure = 0.15
 baseline_noise = 0.6
 baseline_sharpness = 1.25
+cc_reference_wb = [2.5078125, 1.5126953125]
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [12, 8, 10, 8]

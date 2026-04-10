@@ -5,6 +5,7 @@ clean_model = "DSC-RX10"
 baseline_exposure = -0.15
 baseline_noise = 3.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.50390625, 1.84375]
 bayer_green_split = 500
 ##blackpoint = 800
 #whitepoint = 16300

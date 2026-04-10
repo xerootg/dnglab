@@ -4,6 +4,7 @@ clean_make = "Canon"
 clean_model = "EOS 30D"
 baseline_exposure = 0.0
 baseline_noise = 1.25
+cc_reference_wb = [1.8486328125, 1.6572265625]
 color_pattern = "RGGB"
 active_area = [74, 12, 0, 0] # LTRB
 whitepoint = 3398

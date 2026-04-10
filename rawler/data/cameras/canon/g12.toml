@@ -5,6 +5,7 @@ clean_model = "PowerShot G12"
 baseline_exposure = 0.0
 baseline_noise = 3.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.0289855072, 1.6789297659]
 whitepoint = 4000
 color_pattern = "RGGB"
 blackareav = [0, 50]

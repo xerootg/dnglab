@@ -5,6 +5,7 @@ clean_model = "EOS 100D"
 baseline_exposure = 0.25
 baseline_noise = 1.0
 baseline_sharpness = 1.2
+cc_reference_wb = [2.0732421875, 1.5126953125]
 
 model_aliases = [
   ["Canon EOS REBEL SL1", "EOS Rebel SL1"],

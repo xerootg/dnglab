@@ -5,6 +5,7 @@ clean_model = "ZV-E10M2"
 baseline_exposure = 0.1
 baseline_noise = 0.6
 baseline_sharpness = 1.25
+cc_reference_wb = [2.6416015625, 1.705078125]
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 crop_area = [12, 12, 36, 12]

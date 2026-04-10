@@ -5,6 +5,7 @@ clean_model = "DSC-RX100M5A"
 ##blackpoint = 800
 #whitepoint = 16300
 color_pattern = "RGGB"
+cc_reference_wb = [2.26171875, 1.79296875]
 bps = 8
 
 [cameras.color_matrix]

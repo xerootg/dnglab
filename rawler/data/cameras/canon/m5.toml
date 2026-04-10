@@ -5,6 +5,7 @@ clean_model = "EOS M5"
 baseline_exposure = 0.25
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [2.146484375, 1.505859375]
 color_pattern = "RGGB"
 blackareav = [0,260]
 blackareah = [0,30]

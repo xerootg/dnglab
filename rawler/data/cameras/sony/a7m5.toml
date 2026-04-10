@@ -5,6 +5,7 @@ clean_model = "ILCE-7M5"
 baseline_exposure = 0.35
 baseline_noise = 0.6
 baseline_sharpness = 1.33
+cc_reference_wb = [2.26953125, 1.765625]
 color_pattern = "RGGB"
 active_area = [0, 0, 0, 0]
 bps = 8

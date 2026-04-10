@@ -4,6 +4,7 @@ clean_make = "Sony"
 clean_model = "DSC-RX100"
 baseline_exposure = -0.25
 baseline_noise = 3.0
+cc_reference_wb = [2.07421875, 2.16796875]
 bayer_green_split = 500
 ##blackpoint = 800
 #whitepoint = 16300

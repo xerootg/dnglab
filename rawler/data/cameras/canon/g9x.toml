@@ -5,6 +5,7 @@ clean_model = "PowerShot G9 X"
 baseline_exposure = 0.05
 baseline_noise = 1.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.4767309875, 1.3303064699]
 whitepoint = 16000
 color_pattern = "RGGB"
 active_area = [96, 17, 0, 0]

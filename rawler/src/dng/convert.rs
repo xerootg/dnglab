@@ -10,7 +10,7 @@ use image::DynamicImage;
 
 use crate::{
   RawImage, RawImageData,
-  dcp::{DcpProfile, find_dcp},
+  dcp::{DcpProfile, auto_find_dcp, find_dcp},
   decoders::{Decoder, RawDecodeParams, RawPhotometricInterpretation, WellKnownIFD, WhiteLevel},
   dng::{DNG_VERSION_V1_4, PREVIEW_JPEG_QUALITY, original::OriginalCompressed, writer::DngWriter},
   formats::tiff::{Rational, SRational},
@@ -237,7 +237,22 @@ where
   if let Some(bgs) = rawimage.camera.bayer_green_split {
     dng.bayer_green_split(bgs);
   }
-  if let Some(cc) = rawimage.camera.camera_calibration {
+  // CameraCalibration: dynamic cc_reference_wb takes precedence over static camera_calibration
+  if let Some([ref_r, ref_b]) = rawimage.camera.cc_reference_wb {
+    let wb = &rawimage.wb_coeffs;
+    let wb_r = if wb[0].is_nan() || wb[0] <= 0.0 { 1.0 } else { wb[0] as f64 };
+    let wb_b = if wb[2].is_nan() || wb[2] <= 0.0 { 1.0 } else { wb[2] as f64 };
+    let cc_r = (ref_r / wb_r).clamp(0.8, 1.25);
+    let cc_b = (ref_b / wb_b).clamp(0.8, 1.25);
+    let matrix = [
+      SRational::new((cc_r * 10000.0) as i32, 10000), SRational::new(0, 10000), SRational::new(0, 10000),
+      SRational::new(0, 10000), SRational::new(10000, 10000), SRational::new(0, 10000),
+      SRational::new(0, 10000), SRational::new(0, 10000), SRational::new((cc_b * 10000.0) as i32, 10000),
+    ];
+    dng.camera_calibration(1, &matrix);
+    dng.camera_calibration(2, &matrix);
+    log::debug!("Dynamic CameraCalibration: diag({:.4}, 1.0, {:.4}) from ref_wb({:.4}, {:.4}) / as_shot({:.4}, {:.4})", cc_r, cc_b, ref_r, ref_b, wb_r, wb_b);
+  } else if let Some(cc) = rawimage.camera.camera_calibration {
     let matrix = [
       SRational::new((cc[0] * 10000.0) as i32, 10000), SRational::new(0, 10000), SRational::new(0, 10000),
       SRational::new(0, 10000), SRational::new((cc[1] * 10000.0) as i32, 10000), SRational::new(0, 10000),
@@ -307,19 +322,30 @@ where
     }
   }
 
-  // Apply DCP color profile if a profiles directory was provided
+  // Apply DCP color profile — from explicit --dcp-dir, or auto-discovered from system paths
   let style_hint = decoder.picture_style_hint();
-  if let Some(dcp_dir) = &params.dcp_dir {
-    let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
-    match find_dcp(dcp_dir, &unique_model, style_hint.as_deref()) {
-      Some(dcp_path) => match DcpProfile::load(&dcp_path) {
-        Ok(profile) => {
-          dng.root_ifd_mut().copy(profile.copy_tags_iter());
-          log::debug!("Applied DCP profile from: {}", dcp_path.display());
+  let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
+  let dcp_path = if let Some(dcp_dir) = &params.dcp_dir {
+    find_dcp(dcp_dir, &unique_model, style_hint.as_deref())
+  } else {
+    auto_find_dcp(&unique_model, style_hint.as_deref())
+  };
+  if let Some(dcp_path) = &dcp_path {
+    match DcpProfile::load(dcp_path) {
+      Ok(profile) => {
+        // Bake BaselineExposureOffset from the DCP into the BaselineExposure tag.
+        // Adobe combines the camera's static BE + the DCP offset into a single
+        // BaselineExposure value — no separate BaselineExposureOffset tag is written.
+        if let Some(beo) = profile.baseline_exposure_offset() {
+          let base_be = rawimage.camera.baseline_exposure.unwrap_or(0.0) as f64;
+          let combined = base_be + beo;
+          dng.baseline_exposure(SRational::new((combined * 100.0) as i32, 100));
+          log::debug!("BaselineExposure adjusted: {:.2} + DCP offset {:.2} = {:.2}", base_be, beo, combined);
         }
-        Err(err) => log::warn!("Failed to load DCP profile '{}': {:?}", dcp_path.display(), err),
-      },
-      None => log::debug!("No DCP profile found for '{}' in '{}'", unique_model, dcp_dir.display()),
+        dng.root_ifd_mut().copy(profile.copy_tags_iter());
+        log::debug!("Applied DCP profile from: {}", dcp_path.display());
+      }
+      Err(err) => log::warn!("Failed to load DCP profile '{}': {:?}", dcp_path.display(), err),
     }
   }
   if !dng.root_ifd().contains(ExifTag::Orientation) {
@@ -365,13 +391,10 @@ where
   if let Some(mut xpacket) = decoder.xpacket(rawfile, &raw_params)? {
     // If we injected a DCP profile, update crd:CameraProfile in the XMP to
     // match the profile name so that ACR/Lightroom picks up the right profile.
-    if let Some(dcp_dir) = &params.dcp_dir {
-      let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
-      if let Some(dcp_path) = find_dcp(dcp_dir, &unique_model, style_hint.as_deref()) {
-        if let Ok(profile) = DcpProfile::load(&dcp_path) {
-          if let Some(name) = profile.profile_name() {
-            xpacket = patch_xmp_camera_profile(xpacket, &name);
-          }
+    if let Some(dcp_path) = &dcp_path {
+      if let Ok(profile) = DcpProfile::load(dcp_path) {
+        if let Some(name) = profile.profile_name() {
+          xpacket = patch_xmp_camera_profile(xpacket, &name);
         }
       }
     }

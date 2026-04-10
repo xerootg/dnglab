@@ -5,6 +5,7 @@ clean_model = "EOS 5D Mark II"
 baseline_exposure = 0.4
 baseline_noise = 0.8
 baseline_sharpness = 1.2
+cc_reference_wb = [2.275659824, 1.4711632454]
 bayer_green_split = 100
 color_pattern = "GBRG"
 active_area = [158,51,0,0]

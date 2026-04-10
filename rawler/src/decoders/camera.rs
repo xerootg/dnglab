@@ -66,6 +66,11 @@ pub struct Camera {
   /// CameraCalibration: 3x3 diagonal matrix as [r, g, b] scaling factors.
   /// Written as both CameraCalibration1 and CameraCalibration2 DNG tags.
   pub camera_calibration: Option<[f64; 3]>,
+  /// Reference white balance for dynamic CameraCalibration computation.
+  /// When set, the CameraCalibration diagonal is computed per-image as:
+  ///   CC = diag(ref_r / wb_r, 1.0, ref_b / wb_b)
+  /// clamped to [0.8, 1.25]. Takes precedence over static `camera_calibration`.
+  pub cc_reference_wb: Option<[f64; 2]>,
   /// Crop factor relative to 35mm full-frame (diagonal ratio).
   /// Used to compute FocalLengthIn35mmFormat and FocalPlane resolution tags.
   pub crop_factor: Option<f64>,
@@ -321,6 +326,14 @@ impl Camera {
             toml_as_f64(&arr[2]).expect("camera_calibration values must be numeric"),
           ]);
         }
+        "cc_reference_wb" => {
+          let arr = val.as_array().expect("cc_reference_wb must be an array of 2 floats [r, b]");
+          assert_eq!(arr.len(), 2, "cc_reference_wb must have exactly 2 values [r, b]");
+          self.cc_reference_wb = Some([
+            toml_as_f64(&arr[0]).expect("cc_reference_wb values must be numeric"),
+            toml_as_f64(&arr[1]).expect("cc_reference_wb values must be numeric"),
+          ]);
+        }
         "crop_factor" => {
           self.crop_factor = Some(toml_as_f64(val).expect("crop_factor must be numeric"));
         }
@@ -369,6 +382,7 @@ impl Camera {
       bayer_green_split: None,
       default_user_crop: None,
       camera_calibration: None,
+      cc_reference_wb: None,
       crop_factor: None,
       //orientation: Orientation::Unknown,
     }

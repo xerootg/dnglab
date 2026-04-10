@@ -4,6 +4,7 @@ clean_make = "Canon"
 clean_model = "EOS 350D"
 baseline_exposure = 0.25
 baseline_noise = 1.33
+cc_reference_wb = [1.9287109375, 1.37109375]
 
 model_aliases = [
   ["Canon EOS DIGITAL REBEL XT", "EOS Digital Rebel XT"],

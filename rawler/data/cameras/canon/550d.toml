@@ -5,6 +5,7 @@ clean_model = "EOS 550D"
 baseline_exposure = 0.0
 baseline_noise = 1.0
 baseline_sharpness = 1.2
+cc_reference_wb = [2.0400390625, 1.4482421875]
 
 model_aliases = [
   ["Canon EOS REBEL T2i", "EOS Rebel T2i"],

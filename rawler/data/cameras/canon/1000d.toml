@@ -5,6 +5,7 @@ clean_model = "EOS 1000D"
 baseline_exposure = 0.25
 baseline_noise = 1.0
 baseline_sharpness = 1.25
+cc_reference_wb = [2.107421875, 1.466796875]
 
 model_aliases = [
   ["Canon EOS DIGITAL REBEL XS", "EOS Digital Rebel XS"],
