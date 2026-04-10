@@ -9,6 +9,7 @@ active_area = [0, 0, 0, 0]
 crop_area = [12, 12, 44, 12]
 
 baseline_noise = 1.5
+cc_reference_wb = [1.8828125, 1.84375]
 baseline_sharpness = 1.5
 bayer_green_split = 250
 baseline_exposure = 0.0

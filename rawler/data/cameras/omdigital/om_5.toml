@@ -12,6 +12,7 @@ bayer_green_split = 250
 linear_response_limit = 1.0
 anti_alias_strength = 1.0
 camera_calibration = [0.9797, 1.0, 0.9633]
+cc_reference_wb = [1.8828125, 1.84375]
 crop_factor = 2.0
 baseline_exposure = 0.0
 

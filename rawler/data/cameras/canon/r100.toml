@@ -5,6 +5,7 @@ clean_model = "EOS R100"
 baseline_exposure = 0.5
 baseline_noise = 0.8
 baseline_sharpness = 1.2
+cc_reference_wb = [1.8154296875, 1.744140625]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

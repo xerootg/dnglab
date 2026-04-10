@@ -9,6 +9,7 @@ crop_area = [12, 12, 24, 12]
 highres_width = 10400
 baseline_exposure = 0.25
 baseline_noise = 1.5
+cc_reference_wb = [1.875, 1.890625]
 baseline_sharpness = 1.5
 bayer_green_split = 250
 linear_response_limit = 1.0

@@ -5,6 +5,7 @@ clean_model = "EOS M6 Mark II"
 baseline_exposure = 0.5
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [1.7568359375, 1.599609375]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

@@ -10,6 +10,7 @@ crop_area = [10, 3, 6, 2]
 
 baseline_exposure = -0.4
 baseline_noise = 4.0
+cc_reference_wb = [1.60546875, 1.61328125]
 baseline_sharpness = 1.33
 
 [cameras.color_matrix]

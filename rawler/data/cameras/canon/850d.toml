@@ -9,6 +9,7 @@ clean_model = "EOS 850D"
 baseline_exposure = 0.0
 baseline_noise = 1.2
 baseline_sharpness = 1.25
+cc_reference_wb = [1.8251953125, 1.623046875]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

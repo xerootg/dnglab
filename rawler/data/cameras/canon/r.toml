@@ -5,6 +5,7 @@ clean_model = "EOS R"
 baseline_exposure = 0.5
 baseline_noise = 0.8
 baseline_sharpness = 1.2
+cc_reference_wb = [1.984375, 1.462890625]
 bayer_green_split = 100
 color_pattern = "RGGB"
 

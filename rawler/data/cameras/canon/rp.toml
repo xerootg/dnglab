@@ -5,6 +5,7 @@ clean_model = "EOS RP"
 baseline_exposure = 0.5
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [2.0234375, 1.6591796875]
 color_pattern = "RGGB"
 hints = ["bogus_blackarea"]
 

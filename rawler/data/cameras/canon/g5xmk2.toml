@@ -5,6 +5,7 @@ clean_model = "PowerShot G5 X Mark II"
 baseline_exposure = 0.35
 baseline_noise = 1.0
 baseline_sharpness = 1.33
+cc_reference_wb = [2.197265625, 1.771484375]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

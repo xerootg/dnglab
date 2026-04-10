@@ -5,6 +5,7 @@ clean_model = "EOS-1D X Mark III"
 baseline_exposure = 0.35
 baseline_noise = 1.0
 baseline_sharpness = 1.2
+cc_reference_wb = [1.85546875, 1.5830078125]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

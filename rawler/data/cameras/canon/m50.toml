@@ -8,6 +8,7 @@ clean_model = "EOS M50"
 baseline_exposure = 0.5
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [1.50390625, 1.283203125]
 color_pattern = "RGGB"
 active_area = [276, 48, 0, 0]
 

@@ -5,6 +5,7 @@ clean_model = "EOS R8"
 baseline_exposure = 0.5
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [1.892578125, 1.4970703125]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

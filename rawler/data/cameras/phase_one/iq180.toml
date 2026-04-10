@@ -4,6 +4,7 @@ clean_make = "Phase One"
 clean_model = "IQ180"
 baseline_exposure = 0.0
 baseline_noise = 1.25
+cc_reference_wb = [1.123, 0.979]
 bayer_green_split = 500
 #blackpoint = 0
 whitepoint = 65535

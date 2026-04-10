@@ -5,6 +5,7 @@ clean_model = "EOS M200"
 baseline_exposure = 0.33
 baseline_noise = 0.8
 baseline_sharpness = 1.25
+cc_reference_wb = [1.5234375, 1.2958984375]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]

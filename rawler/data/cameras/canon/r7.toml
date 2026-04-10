@@ -5,6 +5,7 @@ clean_model = "EOS R7"
 baseline_exposure = 0.75
 baseline_noise = 0.8
 baseline_sharpness = 1.2
+cc_reference_wb = [1.78125, 1.505859375]
 color_pattern = "RGGB"
 
 [cameras.color_matrix]
