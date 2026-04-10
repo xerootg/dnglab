@@ -163,6 +163,47 @@ where
   if let Some(dng_raw_ifd) = decoder.ifd(WellKnownIFD::VirtualDngRawTags)? {
     raw.ifd_mut().copy(dng_raw_ifd.value_iter());
   }
+
+  // Centralized LCP lens correction fallback.
+  // If the decoder didn't provide OpcodeList3 (distortion correction via
+  // VirtualDngRawTags), try looking up the lens in the Adobe LCP database.
+  if !raw.ifd().contains(DngTag::OpcodeList3) {
+    if let Some(ref lens) = metadata.lens {
+      let focal_mm = metadata
+        .exif
+        .focal_length
+        .map(|r| r.n as f64 / r.d as f64)
+        .unwrap_or(0.0);
+      let aperture = metadata
+        .exif
+        .fnumber
+        .map(|r| r.n as f64 / r.d as f64)
+        .unwrap_or(0.0);
+
+      if focal_mm > 0.0 && rawimage.width > 0 && rawimage.height > 0 {
+        log::debug!(
+          "LCP fallback: lens='{}', focal={:.1}mm, f/{:.1}, {}x{}",
+          lens.lens_name, focal_mm, aperture, rawimage.width, rawimage.height
+        );
+        if let Some(opcodes) = crate::lens_profiles::lookup_lens_opcodes(
+          &lens.lens_name,
+          focal_mm,
+          aperture,
+          rawimage.width as u32,
+          rawimage.height as u32,
+        ) {
+          log::info!("Using Adobe LCP correction for '{}'", lens.lens_name);
+          if !opcodes.opcode_list3.is_empty() {
+            raw.ifd_mut().add_tag_undefined(DngTag::OpcodeList3, opcodes.opcode_list3);
+          }
+          if !opcodes.opcode_list1.is_empty() && !raw.ifd().contains(DngTag::OpcodeList1) {
+            raw.ifd_mut().add_tag_undefined(DngTag::OpcodeList1, opcodes.opcode_list1);
+          }
+        }
+      }
+    }
+  }
+
   raw.finalize()?;
 
   // Write preview and thumbnail if requested.
