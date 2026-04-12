@@ -11,7 +11,9 @@ use pyo3::types::{PyBytes, PyDict};
 use rawler::decoders::RawDecodeParams;
 use rawler::dng::convert::{ConvertParams, convert_raw_file};
 use rawler::dng::{CropMode, DngCompression, DngPhotometricConversion};
+use rawler::formats::tiff::writer::{DirectoryWriter, TiffWriter};
 use rawler::rawsource::RawSource;
+use rawler::tags::TiffCommonTag;
 
 /// Convert a RAW file to DNG bytes in memory.
 ///
@@ -298,6 +300,142 @@ fn extract_preview(
     }
 }
 
+/// Embed EXIF metadata from a RAW file into JPEG bytes.
+///
+/// Reads all EXIF/GPS metadata from the RAW file, builds a standards-compliant
+/// EXIF APP1 segment, and splices it into the JPEG byte stream.
+/// Orientation is overridden to the specified value (default 1, meaning
+/// rotation is already baked into the pixels).
+///
+/// Parameters
+/// ----------
+/// raw_path : str
+///     Path to the original RAW file (metadata source).
+/// jpeg_bytes : bytes
+///     The JPEG image data to embed EXIF into.
+/// orientation : int, default 1
+///     EXIF orientation value to write (1 = normal / already rotated).
+///
+/// Returns
+/// -------
+/// bytes
+///     Modified JPEG bytes with EXIF APP1 segment embedded.
+#[pyfunction]
+#[pyo3(signature = (raw_path, jpeg_bytes, orientation = 1))]
+fn embed_exif(
+    py: Python<'_>,
+    raw_path: &str,
+    jpeg_bytes: &[u8],
+    orientation: u16,
+) -> PyResult<Py<PyBytes>> {
+    let raw = Path::new(raw_path);
+    if !raw.exists() {
+        return Err(PyRuntimeError::new_err(format!("File not found: {raw_path}")));
+    }
+
+    let result = py
+        .detach(|| -> Result<Vec<u8>, String> {
+            // Extract metadata from the RAW file.
+            let rawfile = RawSource::new(raw).map_err(|e| e.to_string())?;
+            let decoder = rawler::get_decoder(&rawfile).map_err(|e| e.to_string())?;
+            let mut md = decoder
+                .raw_metadata(&rawfile, &RawDecodeParams::default())
+                .map_err(|e| e.to_string())?;
+
+            // Override orientation (rotation is baked into rendered pixels).
+            md.exif.orientation = Some(orientation);
+
+            // Strip MakerNotes — they're proprietary blobs often >100KB that
+            // exceed the 64KB APP1 limit and aren't useful for display.
+            md.exif.makernotes = None;
+
+            // Build the TIFF/EXIF structure using the existing writer infrastructure.
+            let mut tiff_buf = Cursor::new(Vec::new());
+            let mut tiff = TiffWriter::new(&mut tiff_buf).map_err(|e| e.to_string())?;
+            let mut root_ifd = DirectoryWriter::new();
+            let mut exif_ifd = DirectoryWriter::new();
+
+            // Write Make/Model to root IFD.
+            if !md.make.is_empty() {
+                root_ifd.add_tag(TiffCommonTag::Make, md.make.as_str());
+            }
+            if !md.model.is_empty() {
+                root_ifd.add_tag(TiffCommonTag::Model, md.model.as_str());
+            }
+
+            // Write all EXIF tags (root IFD fields, Exif sub-IFD, GPS sub-IFD).
+            md.write_exif_tags(&mut tiff, &mut root_ifd, &mut exif_ifd)
+                .map_err(|e| e.to_string())?;
+
+            // Build Exif sub-IFD first, then link from root.
+            if exif_ifd.entry_count() > 0 {
+                let exif_offset = exif_ifd.build(&mut tiff).map_err(|e| e.to_string())?;
+                root_ifd.add_tag(TiffCommonTag::ExifIFDPointer, exif_offset);
+            }
+
+            // Finalize the TIFF structure.
+            tiff.build(root_ifd).map_err(|e| e.to_string())?;
+            let tiff_bytes = tiff_buf.into_inner();
+
+            // Build the EXIF APP1 segment:
+            //   FF E1  (APP1 marker)
+            //   NN NN  (length: 2 + 6 + tiff_bytes.len())
+            //   "Exif\x00\x00"  (6-byte header)
+            //   <TIFF data>
+            let exif_header = b"Exif\x00\x00";
+            let app1_data_len = exif_header.len() + tiff_bytes.len();
+            // APP1 length field includes itself (2 bytes) + data.
+            let app1_length = (2 + app1_data_len) as u16;
+
+            if app1_data_len + 2 > 0xFFFF {
+                return Err("EXIF data too large for a single APP1 segment".into());
+            }
+
+            let mut app1 = Vec::with_capacity(2 + 2 + app1_data_len);
+            app1.extend_from_slice(&[0xFF, 0xE1]); // APP1 marker
+            app1.extend_from_slice(&app1_length.to_be_bytes()); // Length (big-endian)
+            app1.extend_from_slice(exif_header);
+            app1.extend_from_slice(&tiff_bytes);
+
+            // Splice into the JPEG: insert after SOI (FF D8), replacing any
+            // existing APP1 EXIF segment.
+            let jpeg = jpeg_bytes;
+            if jpeg.len() < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
+                return Err("Input is not a valid JPEG (missing SOI marker)".into());
+            }
+
+            let mut output = Vec::with_capacity(jpeg.len() + app1.len());
+            output.extend_from_slice(&jpeg[..2]); // SOI
+
+            // Skip over any existing APP1 EXIF segments.
+            let mut pos = 2;
+            while pos + 4 <= jpeg.len() && jpeg[pos] == 0xFF {
+                let marker = jpeg[pos + 1];
+                // APP1 = 0xE1
+                if marker == 0xE1 {
+                    let seg_len = u16::from_be_bytes([jpeg[pos + 2], jpeg[pos + 3]]) as usize;
+                    // Check if this APP1 is EXIF (starts with "Exif\0\0")
+                    if pos + 4 + 6 <= jpeg.len() && &jpeg[pos + 4..pos + 4 + 4] == b"Exif" {
+                        // Skip this segment entirely.
+                        pos += 2 + seg_len;
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            // Insert our new APP1 segment.
+            output.extend_from_slice(&app1);
+            // Append the rest of the JPEG.
+            output.extend_from_slice(&jpeg[pos..]);
+
+            Ok(output)
+        })
+        .map_err(|e| PyRuntimeError::new_err(format!("EXIF embedding failed: {e}")))?;
+
+    Ok(PyBytes::new(py, &result).into())
+}
+
 #[pymodule]
 fn dnglab_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(convert_to_dng, m)?)?;
@@ -306,5 +444,6 @@ fn dnglab_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(supported_extensions, m)?)?;
     m.add_function(wrap_pyfunction!(raw_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(extract_preview, m)?)?;
+    m.add_function(wrap_pyfunction!(embed_exif, m)?)?;
     Ok(())
 }
