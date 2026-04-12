@@ -337,6 +337,17 @@ impl<'a> Decoder for Rw2Decoder<'a> {
       }
     }
 
+    // When lens_spec is still None but we have a lens_model string,
+    // try to parse focal/aperture ranges from it.
+    // Examples: "LUMIX G VARIO 14-42/F3.5-5.6 II", "LUMIX G 25/F1.7"
+    if mdata.exif.lens_spec.is_none() {
+      if let Some(ref model) = mdata.exif.lens_model {
+        if let Some(spec) = parse_lens_spec_from_name(model) {
+          mdata.exif.lens_spec = Some(spec);
+        }
+      }
+    }
+
     Ok(mdata)
   }
 
@@ -855,4 +866,56 @@ fn parse_panasonic_distortion(data: &[u8]) -> Option<PanasonicDistortionParams> 
   );
 
   Some(params)
+}
+
+/// Parse focal and aperture ranges from a Panasonic/Lumix lens name string.
+///
+/// Handles common formats:
+///   - `"LUMIX G VARIO 14-42/F3.5-5.6 II"` → \[14, 42, 3.5, 5.6\]
+///   - `"LUMIX G 25/F1.7"` → \[25, 25, 1.7, 1.7\]
+///   - `"LEICA DG 12-60/F2.8-4.0"` → \[12, 60, 2.8, 4.0\]
+fn parse_lens_spec_from_name(name: &str) -> Option<[Rational; 4]> {
+  // Find the "NN-NN/FN.N-N.N" or "NN/FN.N" pattern.
+  // Strategy: find the '/' that separates focal from aperture.
+  let slash_pos = name.find('/')?;
+  let before_slash = &name[..slash_pos];
+  let after_slash = &name[slash_pos + 1..];
+
+  // Parse focal range: take the last numeric segment before '/'.
+  // E.g. "LUMIX G VARIO 14-42" → "14-42"
+  let focal_str = before_slash.rsplit(|c: char| !c.is_ascii_digit() && c != '-').next().unwrap_or("");
+  let (fl_min, fl_max) = parse_range(focal_str)?;
+
+  // Parse aperture range: strip leading 'F' or 'f', then parse.
+  // E.g. "F3.5-5.6 II" → "3.5-5.6"
+  let ap_str = after_slash.trim_start_matches(|c: char| c == 'F' || c == 'f');
+  let ap_end = ap_str.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-').unwrap_or(ap_str.len());
+  let (ap_min, ap_max) = parse_range(&ap_str[..ap_end])?;
+
+  Some([float_to_rational(fl_min), float_to_rational(fl_max), float_to_rational(ap_min), float_to_rational(ap_max)])
+}
+
+fn parse_range(s: &str) -> Option<(f64, f64)> {
+  if s.is_empty() {
+    return None;
+  }
+  if let Some(dash_pos) = s.find('-') {
+    let a: f64 = s[..dash_pos].parse().ok()?;
+    let b: f64 = s[dash_pos + 1..].parse().ok()?;
+    Some((a, b))
+  } else {
+    let v: f64 = s.parse().ok()?;
+    Some((v, v))
+  }
+}
+
+fn float_to_rational(v: f64) -> Rational {
+  // Use denominator 10 for values with one decimal, 100 for two, 1 for integers.
+  if (v - v.round()).abs() < 0.001 {
+    Rational { n: v.round() as u32, d: 1 }
+  } else if (v * 10.0 - (v * 10.0).round()).abs() < 0.001 {
+    Rational { n: (v * 10.0).round() as u32, d: 10 }
+  } else {
+    Rational { n: (v * 100.0).round() as u32, d: 100 }
+  }
 }

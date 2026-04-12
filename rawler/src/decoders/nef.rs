@@ -407,6 +407,18 @@ impl<'a> Decoder for NefDecoder<'a> {
       }
     };
 
+    // Tag 0x1d NefSerial: camera body serial number from MakerNotes.
+    if mdata.exif.serial_number.is_none() {
+      if let Some(entry) = self.makernote.get_entry(NikonMakernote::NefSerial) {
+        let data = entry.get_data();
+        let serial_str: String = data.iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
+        let serial_str = serial_str.trim().to_string();
+        if !serial_str.is_empty() {
+          mdata.exif.serial_number = Some(serial_str);
+        }
+      }
+    }
+
     // Tag 0x84 Lens: fallback LensInfo when lens database doesn't provide it
     if mdata.exif.lens_spec.is_none() {
       if let Some(entry) = self.makernote.get_entry(NikonMakernote::Lens) {

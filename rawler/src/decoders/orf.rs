@@ -366,7 +366,7 @@ impl<'a> Decoder for OrfDecoder<'a> {
       if valid == 0 {
         return Ok(None);
       }
-      let offset = cs_ifd
+      let rel_offset = cs_ifd
         .get_entry(OrfCameraSettings::PreviewImageStart)
         .map(|e| e.force_u32(0) as u64)
         .unwrap_or(0);
@@ -374,10 +374,14 @@ impl<'a> Decoder for OrfDecoder<'a> {
         .get_entry(OrfCameraSettings::PreviewImageLength)
         .map(|e| e.force_u32(0) as u64)
         .unwrap_or(0);
-      if offset == 0 || length == 0 {
+      if rel_offset == 0 || length == 0 {
         return Ok(None);
       }
-      let buf = file.subview(offset, length)?;
+      // PreviewImageStart is relative to the MakerNotes base offset,
+      // not an absolute file position.  Add the IFD base to get the
+      // true file offset.
+      let abs_offset = rel_offset + cs_ifd.base as u64;
+      let buf = file.subview(abs_offset, length)?;
       let (width, height) = super::jpeg_dimensions(&buf);
       if width > 0 && height > 0 {
         return Ok(Some((buf.to_vec(), width, height)));
