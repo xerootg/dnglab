@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dnglab"
+version = "0.7.2"
+description = "Python bindings for dnglab RAW-to-DNG conversion"
+requires-python = ">=3.9"
+license = "LGPL-2.1-only"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "Pillow>=10.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.maturin]
+features = []
+module-name = "dnglab_py"

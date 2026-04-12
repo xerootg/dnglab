@@ -1,0 +1,18 @@
+[package]
+name = "dnglab-py"
+version = "0.7.2"
+edition = "2024"
+rust-version = "1.88"
+description = "Python bindings for dnglab RAW-to-DNG conversion"
+license = "LGPL-2.1"
+
+[lib]
+name = "dnglab_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+rawler = { path = "../rawler" }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+serde_json = "1"
+log = "0.4"

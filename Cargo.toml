@@ -2,7 +2,8 @@
 members = [
 	"bin/dnglab",
 	"rawler",
-	"embedftp"
+	"embedftp",
+	"dnglab-py",
 ]
 resolver = "2"
 

@@ -1,0 +1,17 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+fastapi = ">=0.104"
+uvicorn = {extras = ["standard"], version = ">=0.24"}
+httpx = ">=0.25"
+
+[dev-packages]
+
+[requires]
+python_version = "3"
+
+[scripts]
+server = "uvicorn serve:app --reload --port 8800"
