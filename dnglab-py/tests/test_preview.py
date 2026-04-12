@@ -241,3 +241,10 @@ class TestPreviewErrors:
     def test_nonexistent_file(self):
         with pytest.raises(RuntimeError, match="File not found"):
             dnglab_py.extract_preview("/nonexistent/photo.arw")
+
+    def test_unsupported_file_format(self, tmp_path):
+        """A non-RAW file should raise RuntimeError, not crash."""
+        jpg = tmp_path / "fake.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        with pytest.raises(RuntimeError, match="[Pp]review.*failed|[Nn]o decoder"):
+            dnglab_py.extract_preview(str(jpg))

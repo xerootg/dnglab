@@ -273,6 +273,87 @@ class TestDngAccuracy:
 # Error handling
 # ---------------------------------------------------------------------------
 
+class TestDngRoundTrip:
+    """Convert RAW → DNG → DNG and verify metadata survives."""
+
+    def test_dng_to_dng_preserves_metadata(self, raw_sample, tmp_path):
+        """DNG output is itself a valid DNG input — metadata round-trips."""
+        raw_path = str(raw_sample["abs_path"])
+        dng1_bytes = dnglab_py.convert_to_dng(raw_path)
+        dng1_file = tmp_path / "step1.dng"
+        dng1_file.write_bytes(dng1_bytes)
+
+        dng2_bytes = dnglab_py.convert_to_dng(str(dng1_file))
+        dng2_file = tmp_path / "step2.dng"
+        dng2_file.write_bytes(dng2_bytes)
+
+        md1 = dnglab_py.raw_metadata(str(dng1_file))
+        md2 = dnglab_py.raw_metadata(str(dng2_file))
+        dng1_file.unlink()
+        dng2_file.unlink()
+
+        assert md1["make"] == md2["make"]
+        assert md1["model"] == md2["model"]
+        for key in ("fnumber", "exposure_time", "focal_length", "orientation",
+                     "date_time_original"):
+            v1 = md1["exif"].get(key)
+            v2 = md2["exif"].get(key)
+            if v1 is not None:
+                assert v2 == v1, f"DNG→DNG lost {key}: {v1!r} → {v2!r}"
+
+
+class TestDcpDir:
+    """Test the dcp_dir parameter for DCP color profile loading."""
+
+    def test_nonexistent_dcp_dir_still_converts(self, raw_sample):
+        """A missing dcp_dir does not crash — it just has no profile effect."""
+        dng = dnglab_py.convert_to_dng(
+            str(raw_sample["abs_path"]),
+            dcp_dir="/nonexistent/dcp/profiles",
+        )
+        assert len(dng) > 1000
+        assert _is_valid_tiff(dng)
+
+    def test_empty_dcp_dir_still_converts(self, raw_sample, tmp_path):
+        """An empty dcp_dir does not crash."""
+        dcp_dir = tmp_path / "empty_dcp"
+        dcp_dir.mkdir()
+        dng = dnglab_py.convert_to_dng(
+            str(raw_sample["abs_path"]),
+            dcp_dir=str(dcp_dir),
+        )
+        assert _is_valid_tiff(dng)
+
+
+class TestIndexParam:
+    """Test the index parameter for multi-image RAW files."""
+
+    def test_index_zero_is_default(self, raw_sample):
+        """index=0 should produce output the same size as the default."""
+        path = str(raw_sample["abs_path"])
+        dng_default = dnglab_py.convert_to_dng(path)
+        dng_zero = dnglab_py.convert_to_dng(path, index=0)
+        # Byte-exact comparison fails because ModifyDate embeds the
+        # current timestamp.  Same size proves the same image was encoded.
+        assert len(dng_default) == len(dng_zero), (
+            f"index=0 ({len(dng_zero)} B) differs in size from "
+            f"default ({len(dng_default)} B)"
+        )
+
+    def test_index_one_does_not_crash(self, raw_sample):
+        """index=1 on a single-image file should not crash.
+
+        Some formats silently fall back to index 0; this just verifies
+        the parameter is accepted without error.
+        """
+        dng = dnglab_py.convert_to_dng(str(raw_sample["abs_path"]), index=1)
+        assert _is_valid_tiff(dng)
+
+
+# ---------------------------------------------------------------------------
+# Error handling
+# ---------------------------------------------------------------------------
+
 class TestConvertErrors:
     """Verify error paths for convert_to_dng()."""
 
@@ -295,3 +376,10 @@ class TestConvertErrors:
                 "/nonexistent/raw_file.arw",
                 crop="bogus",
             )
+
+    def test_unsupported_file_format(self, tmp_path):
+        """A non-RAW file should raise RuntimeError, not crash."""
+        jpg = tmp_path / "fake.jpg"
+        jpg.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        with pytest.raises(RuntimeError, match="[Cc]onversion failed|[Nn]o decoder"):
+            dnglab_py.convert_to_dng(str(jpg))
