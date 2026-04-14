@@ -16,7 +16,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::{
-  collections::{BTreeMap, HashMap},
+  collections::BTreeMap,
   io::{Read, Seek, SeekFrom},
 };
 
@@ -42,7 +42,7 @@ pub struct IFD {
   pub next_ifd: u32,
   pub entries: BTreeMap<u16, Entry>,
   pub endian: Endian,
-  pub sub: HashMap<u16, Vec<IFD>>,
+  pub sub: BTreeMap<u16, Vec<IFD>>,
   pub chain: Vec<IFD>,
 }
 
@@ -102,7 +102,7 @@ impl IFD {
 
   pub fn new<R: Read + Seek>(reader: &mut R, offset: u32, base: u32, corr: i32, endian: Endian, sub_tags: &[u16]) -> Result<IFD> {
     reader.seek(SeekFrom::Start((base + offset) as u64))?;
-    let mut sub_ifd_offsets = HashMap::new();
+    let mut sub_ifd_offsets = BTreeMap::new();
     let mut reader = EndianReader::new(reader, endian);
     let entry_count = reader.read_u16()?;
 
@@ -115,7 +115,7 @@ impl IFD {
     }
 
     let mut entries = BTreeMap::new();
-    let mut sub = HashMap::new();
+    let mut sub = BTreeMap::new();
     let mut next_pos = reader.position()?;
     debug!("Parse entries");
     let mut consecutive_errors = 0;
@@ -324,7 +324,7 @@ impl IFD {
     }
   }
 
-  pub fn sub_ifds(&self) -> &HashMap<u16, Vec<IFD>> {
+  pub fn sub_ifds(&self) -> &BTreeMap<u16, Vec<IFD>> {
     &self.sub
   }
 

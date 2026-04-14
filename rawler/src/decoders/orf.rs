@@ -558,13 +558,20 @@ impl<'a> OrfDecoder<'a> {
   }
 
   fn get_blacklevel(&self, bps: usize) -> Result<Option<BlackLevel>> {
-    let ifd = self.makernote.find_ifds_with_tag(OrfImageProcessing::OrfBlackLevels);
-    if ifd.is_empty() {
-      log::info!("ORF: Couldn't find ImgProc IFD, unable to read blacklevel");
-      return Ok(None);
-    }
+    // Use the specific ImageProcessing sub-IFD instead of a generic recursive
+    // search.  find_ifds_with_tag iterates HashMap-backed sub-IFDs in
+    // non-deterministic order, so multiple sub-IFDs containing the same tag
+    // number would return an unpredictable result.
+    let imgproc = self.makernote.get_sub_ifd(OrfMakernotes::ImageProcessingIFD);
+    let ifd = match imgproc {
+      Some(ifd) if ifd.get_entry(OrfImageProcessing::OrfBlackLevels).is_some() => ifd,
+      _ => {
+        log::info!("ORF: Couldn't find ImgProc IFD, unable to read blacklevel");
+        return Ok(None);
+      }
+    };
 
-    let blacks = fetch_tiff_tag!(ifd[0], OrfImageProcessing::OrfBlackLevels);
+    let blacks = fetch_tiff_tag!(ifd, OrfImageProcessing::OrfBlackLevels);
     let mut levels = [blacks.force_u16(0), blacks.force_u16(1), blacks.force_u16(2), blacks.force_u16(3)];
     if bps == 14 {
       // Blacklevel is encoded for 12 bits
@@ -574,22 +581,24 @@ impl<'a> OrfDecoder<'a> {
   }
 
   fn get_bits_per_pixel(&self) -> Result<Option<u16>> {
-    let ifd = self.makernote.find_ifds_with_tag(OrfImageProcessing::ValidBits);
-    if ifd.is_empty() {
-      return Ok(None);
-    }
-    Ok(Some(fetch_tiff_tag!(ifd[0], OrfImageProcessing::ValidBits).force_u16(0)))
+    let imgproc = self.makernote.get_sub_ifd(OrfMakernotes::ImageProcessingIFD);
+    let ifd = match imgproc {
+      Some(ifd) if ifd.get_entry(OrfImageProcessing::ValidBits).is_some() => ifd,
+      _ => return Ok(None),
+    };
+    Ok(Some(fetch_tiff_tag!(ifd, OrfImageProcessing::ValidBits).force_u16(0)))
   }
 
   fn get_crop(&self) -> Result<Option<Rect>> {
-    let ifd = self.makernote.find_ifds_with_tag(OrfImageProcessing::CropLeft);
-    if ifd.is_empty() {
-      return Ok(None);
-    }
-    let crop_left = fetch_tiff_tag!(ifd[0], OrfImageProcessing::CropLeft).force_usize(0);
-    let crop_top = fetch_tiff_tag!(ifd[0], OrfImageProcessing::CropTop).force_usize(0);
-    let crop_width = fetch_tiff_tag!(ifd[0], OrfImageProcessing::CropWidth).force_usize(0);
-    let crop_height = fetch_tiff_tag!(ifd[0], OrfImageProcessing::CropHeight).force_usize(0);
+    let imgproc = self.makernote.get_sub_ifd(OrfMakernotes::ImageProcessingIFD);
+    let ifd = match imgproc {
+      Some(ifd) if ifd.get_entry(OrfImageProcessing::CropLeft).is_some() => ifd,
+      _ => return Ok(None),
+    };
+    let crop_left = fetch_tiff_tag!(ifd, OrfImageProcessing::CropLeft).force_usize(0);
+    let crop_top = fetch_tiff_tag!(ifd, OrfImageProcessing::CropTop).force_usize(0);
+    let crop_width = fetch_tiff_tag!(ifd, OrfImageProcessing::CropWidth).force_usize(0);
+    let crop_height = fetch_tiff_tag!(ifd, OrfImageProcessing::CropHeight).force_usize(0);
     Ok(Some(Rect::new(Point::new(crop_left, crop_top), Dim2::new(crop_width, crop_height))))
   }
 
