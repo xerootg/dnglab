@@ -154,11 +154,6 @@ impl DirectoryWriter {
   pub fn add_tag<T: TiffTag, V: Into<Value>>(&mut self, tag: T, value: V) {
     let tag: u16 = tag.into();
     let value = value.into();
-    if tag == 50714 {
-      let mut dbg = Vec::new();
-      let _ = value.write(&mut dbg);
-      eprintln!("add_tag BL(50714): count={} byte_size={} raw_hex={}", value.count(), value.byte_size(), dbg.iter().map(|b| format!("{:02x}", b)).collect::<String>());
-    }
     self.entries.insert(
       tag,
       Entry {
@@ -171,9 +166,6 @@ impl DirectoryWriter {
 
   pub fn add_untyped_tag<V: Into<Value>>(&mut self, tag: u16, value: V) {
     let value = value.into();
-    if tag == 50714 {
-      eprintln!("add_untyped_tag BL(50714): count={} byte_size={}", value.count(), value.byte_size());
-    }
     self.entries.insert(
       tag,
       Entry {
@@ -255,25 +247,6 @@ impl DirectoryWriter {
         tiff.pad_word_boundary()?;
         let offset = tiff.position()?;
         value.write(&mut tiff.writer)?;
-        let after = tiff.position()?;
-        // Debug: log all overflow writes, flag BlackLevel specially
-        if *tag >= 50000 {
-          eprintln!(
-            "TIFF overflow: tag={} offset={} bytes={} count={}",
-            tag, offset, after - offset, value.count()
-          );
-        }
-        if *tag == 50714u16 {
-          // Serialize value to a temp buffer to see what SHOULD have been written
-          let mut expected = Vec::new();
-          value.write(&mut expected)?;
-          eprintln!(
-            "TIFF BL: expected_hex={} value_count={} value_type={}",
-            expected.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
-            value.count(),
-            value.value_type()
-          );
-        }
         embedded.replace(offset as u32);
       } else {
         if value.count() == 0 {

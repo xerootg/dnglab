@@ -272,15 +272,11 @@ where
       .ifd_mut()
       .add_tag(DngTag::BlackLevelRepeatDim, [blacklevel.height as u16, blacklevel.width as u16]);
 
-    eprintln!("DNG BL pre-shift: {:?}", rawimage.blacklevel.levels);
-    eprintln!("DNG BL post-shift: {:?}", blacklevel.levels);
     if blacklevel.levels.iter().all(|x| x.d == 1) {
       let payload: Vec<u32> = blacklevel.levels.iter().map(|x| x.n as u32).collect();
-      eprintln!("DNG BL payload: {:?} from levels: {:?}", payload, blacklevel.levels);
       if payload.iter().all(|x| *x <= (u16::MAX as u32)) {
         // Add as u16
         let bl_u16: Vec<u16> = payload.into_iter().map(|x| x as u16).collect();
-        eprintln!("DNG BL u16: {:?}", bl_u16);
         self.ifd_mut().add_tag(DngTag::BlackLevel, &bl_u16);
       } else {
         // Add as u32

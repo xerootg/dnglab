@@ -366,7 +366,6 @@ impl RawImage {
 
     let cam_bl = cam.make_blacklevel(cpp);
     let invalid_hint = cam.find_hint("invalid_blacklevel");
-    eprintln!("RawImage BL chain: cam_bl={:?} invalid_hint={} input_bl={:?}", cam_bl.as_ref().map(|b| &b.levels), invalid_hint, blacklevel.as_ref().map(|b| &b.levels));
     let blacklevel = cam_bl
       .or_else(|| if invalid_hint { None } else { blacklevel })
       .or_else(|| {
@@ -374,12 +373,10 @@ impl RawImage {
           Some(BlackLevel::default())
         } else {
           let calc = Self::calc_black_levels::<u16>(&cam.cfa, &blackareas, image.width, image.height, image.pixels());
-          eprintln!("RawImage BL calc_black_levels: {:?}", calc.as_ref().map(|b| &b.levels));
           calc
         }
       })
       .unwrap_or_else(|| BlackLevel::zero(1, 1, cpp));
-    eprintln!("RawImage BL final: {:?}", blacklevel.levels);
 
     let whitelevel = cam
       .make_whitelevel(cpp)
