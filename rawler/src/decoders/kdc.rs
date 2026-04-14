@@ -65,7 +65,12 @@ impl<'a> Decoder for KdcDecoder<'a> {
     if self.camera.clean_model == "DC120" {
       let width = 848;
       let height = 976;
-      let raw = self.tiff.find_ifds_with_tag(TiffCommonTag::CFAPattern)[0];
+      let raw = self
+        .tiff
+        .find_first_ifd_with_tag(TiffCommonTag::CFAPattern)
+        .ok_or_else(|| {
+          RawlerError::DecoderFailed("KDC DC120: CFAPattern tag not found".to_string())
+        })?;
       let off = fetch_tiff_tag!(raw, TiffCommonTag::StripOffsets).force_usize(0);
       let mut white = self.camera.whitelevel.clone().expect("KDC needs a whitelevel in camera config")[0];
       let src = file.subview_until_eof(off as u64)?;
@@ -90,7 +95,12 @@ impl<'a> Decoder for KdcDecoder<'a> {
     }
 
     if self.camera.clean_model == "DC50" {
-      let raw = self.tiff.find_ifds_with_tag(TiffCommonTag::CFAPattern)[0];
+      let raw = self
+        .tiff
+        .find_first_ifd_with_tag(TiffCommonTag::CFAPattern)
+        .ok_or_else(|| {
+          RawlerError::DecoderFailed("KDC DC50: CFAPattern tag not found".to_string())
+        })?;
       let width = self.camera.raw_width;
       let height = self.camera.raw_height;
       let off = fetch_tiff_tag!(raw, TiffCommonTag::StripOffsets).force_usize(0);
@@ -215,5 +225,57 @@ impl<'a> KdcDecoder<'a> {
     }
 
     Ok(out)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::formats::tiff::writer::TiffWriter;
+  use crate::global_loader;
+  use crate::rawsource::RawSource;
+  use std::io::Cursor;
+
+  /// Build a minimal in-memory TIFF tagged as a KDC DC120 but missing the
+  /// `CFAPattern` tag.  The KDC decoder reaches `find_ifds_with_tag(CFAPattern)[0]`
+  /// and panics on the empty Vec.  After the fix it must return `Err`.
+  fn dc120_tiff_without_cfa_pattern() -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    let mut tiff = TiffWriter::new(&mut buf).unwrap();
+    let mut dir = tiff.new_directory();
+    dir.add_tag(TiffCommonTag::Make, "Eastman Kodak Company");
+    dir.add_tag(TiffCommonTag::Model, "Kodak DC120 ZOOM Digital Camera");
+    // Provide a StripOffsets entry so any later code that fetches it has
+    // something to read; intentionally OMIT CFAPattern.
+    dir.add_tag(TiffCommonTag::StripOffsets, 0u32);
+    tiff.build(dir).unwrap();
+    buf.into_inner()
+  }
+
+  /// Regression: the KDC decoder must not panic when a DC120-tagged file is
+  /// missing the `CFAPattern` tag.  Previously `raw_image()` indexed
+  /// `find_ifds_with_tag(CFAPattern)[0]` directly and panicked on the empty
+  /// Vec.  After the fix the decoder returns an error.
+  #[test]
+  fn dc120_missing_cfa_pattern_returns_err_not_panic() {
+    let tiff_bytes = dc120_tiff_without_cfa_pattern();
+    let raw_source = RawSource::new_from_slice(&tiff_bytes);
+    let loader = global_loader();
+    let tiff = GenericTiffReader::new(&mut std::io::Cursor::new(&tiff_bytes), 0, 0, None, &[]).unwrap();
+    let decoder = KdcDecoder::new(&raw_source, tiff, loader)
+      .expect("decoder construction should succeed for a DC120-tagged TIFF");
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      decoder.raw_image(&raw_source, &Default::default(), false)
+    }));
+
+    match result {
+      Ok(Ok(_)) => panic!("Expected raw_image to fail when CFAPattern is missing, but it succeeded"),
+      Ok(Err(_)) => {} // good — graceful error
+      Err(_) => panic!(
+        "raw_image PANICKED instead of returning Err when CFAPattern is missing — \
+         this is the bug we are guarding against (find_ifds_with_tag(...)[0] on empty Vec)"
+      ),
+    }
   }
 }

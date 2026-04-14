@@ -1302,9 +1302,13 @@ pub enum OrfRawInfo {
 ///
 /// Returns `None` if the flag is absent/zero or the coefficient tag is missing.
 fn build_orf_warp_rectilinear(makernote: &IFD) -> Option<Vec<u8>> {
-  // Look for the ImageProcessing sub-IFD
-  let ifds = makernote.find_ifds_with_tag(OrfImageProcessing::DistortionCoefficients);
-  let imgproc = ifds.first()?;
+  // Look up the ImageProcessing sub-IFD specifically.  Olympus reuses tag
+  // numbers across sub-IFDs, so a generic recursive `find_ifds_with_tag`
+  // search would pick whichever sub-IFD comes first by traversal order
+  // (BTreeMap key order — EquipmentIFD 0x2010 before ImageProcessingIFD
+  // 0x2040), which is the bug that caused intermittent pink rendering on
+  // BlackLevel.  See decoding_bugs.md for the broader pattern.
+  let imgproc = makernote.get_sub_ifd(OrfMakernotes::ImageProcessingIFD)?;
 
   // Check validity flag (tag 0x150f) — value 1 means the data is valid
   let valid = imgproc
@@ -1341,4 +1345,100 @@ fn build_orf_warp_rectilinear(makernote: &IFD) -> Option<Vec<u8>> {
   let kt = [[0.0_f64, 0.0_f64]];
   let opcode = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
   Some(opcodes::encode_opcode_list(&[opcode]))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::bits::Endian;
+  use crate::formats::tiff::Entry;
+  use std::collections::BTreeMap;
+
+  /// Build a minimal IFD containing the given entries (no sub-IFDs).
+  fn make_ifd(entries: Vec<(u16, Value)>) -> IFD {
+    let mut tags = BTreeMap::new();
+    for (tag, value) in entries {
+      tags.insert(tag, Entry { tag, value, embedded: None });
+    }
+    IFD {
+      offset: 0,
+      base: 0,
+      corr: 0,
+      next_ifd: 0,
+      entries: tags,
+      endian: Endian::Little,
+      sub: BTreeMap::new(),
+      chain: Vec::new(),
+    }
+  }
+
+  /// Regression: `build_orf_warp_rectilinear` must read DistortionCoefficients
+  /// from the ImageProcessing sub-IFD specifically, not from any sub-IFD that
+  /// happens to contain tag 0x1510.
+  ///
+  /// Olympus makernotes contain several sub-IFDs (Equipment, CameraSettings,
+  /// ImageProcessing, RawInfo).  Tag numbers are namespaced per sub-IFD, so
+  /// the *same* numeric tag ID can mean different things in different
+  /// sub-IFDs.  Using `find_ifds_with_tag(0x1510).first()` picks whichever
+  /// sub-IFD comes first by traversal order (BTreeMap key order), which is
+  /// `EquipmentIFD = 0x2010` BEFORE `ImageProcessingIFD = 0x2040`.
+  #[test]
+  fn build_orf_warp_rectilinear_uses_imageprocessing_subifd() {
+    // ImageProcessingIFD: valid distortion data with scale=2.0 — must be picked
+    let imgproc = make_ifd(vec![
+      (OrfImageProcessing::DistortionCorrectionValid as u16, Value::Byte(vec![1])),
+      (
+        OrfImageProcessing::DistortionCoefficients as u16,
+        Value::Float(vec![0.1, 0.2, 0.3, 2.0]),
+      ),
+    ]);
+
+    // EquipmentIFD: a confounder that ALSO has tag 0x1510 with a different
+    // scale. (In real ORFs the same tag number is reused for unrelated data
+    // in different sub-IFDs — that is the bug we are guarding against.)
+    let equipment = make_ifd(vec![
+      (OrfImageProcessing::DistortionCorrectionValid as u16, Value::Byte(vec![1])),
+      (
+        OrfImageProcessing::DistortionCoefficients as u16,
+        Value::Float(vec![9.9, 9.9, 9.9, 9.9]),
+      ),
+    ]);
+
+    // Build the makernote with both sub-IFDs.  EquipmentIFD (0x2010) sorts
+    // before ImageProcessingIFD (0x2040), so a naive `find_ifds_with_tag`
+    // search would return Equipment first.
+    let mut makernote = make_ifd(vec![]);
+    makernote.sub.insert(OrfMakernotes::EquipmentIFD as u16, vec![equipment]);
+    makernote.sub.insert(OrfMakernotes::ImageProcessingIFD as u16, vec![imgproc]);
+
+    let result = build_orf_warp_rectilinear(&makernote);
+    assert!(result.is_some(), "Expected WarpRectilinear opcode to be produced");
+    let bytes = result.unwrap();
+
+    // The opcode bytes encode kr0=scale, kr1=scale*k1, etc.  Re-encode the
+    // expected output, using the same f32→f64 promotion the production code
+    // does so that float rounding matches exactly.
+    let to_f64 = |v: f32| v as f64;
+    let expected = {
+      let scale = to_f64(2.0_f32);
+      let kr = [[scale, scale * to_f64(0.1_f32), scale * to_f64(0.2_f32), scale * to_f64(0.3_f32)]];
+      let kt = [[0.0_f64, 0.0_f64]];
+      let op = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+      opcodes::encode_opcode_list(&[op])
+    };
+    let wrong = {
+      let scale = to_f64(9.9_f32);
+      let kr = [[scale, scale * to_f64(9.9_f32), scale * to_f64(9.9_f32), scale * to_f64(9.9_f32)]];
+      let kt = [[0.0_f64, 0.0_f64]];
+      let op = opcodes::encode_warp_rectilinear(&kr, &kt, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
+      opcodes::encode_opcode_list(&[op])
+    };
+
+    assert_eq!(
+      bytes, expected,
+      "build_orf_warp_rectilinear picked the wrong sub-IFD's data \
+       (got the EquipmentIFD confounder instead of ImageProcessingIFD)"
+    );
+    assert_ne!(bytes, wrong, "Unexpected match against confounder data");
+  }
 }
