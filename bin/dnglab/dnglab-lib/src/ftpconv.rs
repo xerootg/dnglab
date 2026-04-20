@@ -63,6 +63,7 @@ pub async fn ftpserver(options: &ArgMatches) -> crate::Result<()> {
     apply_scaling: false,
     keep_mtime: options.get_flag("keep_mtime"),
     dcp_dir: options.get_one::<PathBuf>("dcp_dir").cloned(),
+    dcp_file: None,
   };
   let keep_orig = options.get_flag("keep_orig");
 

@@ -93,6 +93,7 @@ fn convert_to_dng(
         index,
         keep_mtime: false,
         dcp_dir: dcp_dir.map(PathBuf::from),
+        dcp_file: None,
     };
 
     let raw = Path::new(raw_path);
