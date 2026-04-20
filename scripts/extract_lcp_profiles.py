@@ -137,12 +137,21 @@ def parse_lcp(path):
         if flx == 0:
             continue
 
+        # PerspectiveModel v2 is what rawler's Adobe→DNG conversion targets.
+        # v1 uses different normalization; skip to avoid emitting wrong coefficients.
+        version = get_prop(pm, "Version")
+        if version and version.strip() != "2":
+            continue
+
         entry["flx"] = flx
         entry["cx"] = get_float(pm, "ImageXCenter", 0.5)
         entry["cy"] = get_float(pm, "ImageYCenter", 0.5)
         entry["k1"] = get_float(pm, "RadialDistortParam1")
         entry["k2"] = get_float(pm, "RadialDistortParam2")
         entry["k3"] = get_float(pm, "RadialDistortParam3")
+        # Lower residual = better calibration fit. Used as tie-breaker when
+        # multiple entries share (focal, aperture).
+        entry["residual_error"] = get_float(pm, "ResidualMeanError", -1.0)
 
         # Vignette sub-model (inside PerspectiveModel)
         vig = get_sub_element(pm, "VignetteModel")
@@ -200,12 +209,22 @@ def build_lens_profiles(lcp_dir):
 
     profiles = {}
     for lens_name, all_entries in sorted(lens_data.items()):
-        # Pick the camera with the most entries (best calibration)
+        # Group entries by camera body. Merging across bodies would risk mixing
+        # full-frame and crop-sensor calibrations (same lens, different effective
+        # focal coverage), so we keep one body per lens. But we pick that body
+        # by real coverage — unique (focal, aperture) combos — rather than raw
+        # entry count, which double-counts multi-focus-distance duplicates.
         by_camera = defaultdict(list)
         for e in all_entries:
             by_camera[e["camera_name"]].append(e)
-        # Use the camera body that has the most calibration points
-        best_camera = max(by_camera, key=lambda c: len(by_camera[c]))
+
+        def body_score(cam_entries):
+            combos = {(e["focal_length"], fnumber_from_apex(e["aperture_value"])) for e in cam_entries}
+            with_vig = sum(1 for e in cam_entries if "v1" in e)
+            with_ca = sum(1 for e in cam_entries if "ca_red_scale" in e or "ca_blue_scale" in e)
+            return (len(combos), with_vig, with_ca, len(cam_entries))
+
+        best_camera = max(by_camera, key=lambda c: body_score(by_camera[c]))
         entries = by_camera[best_camera]
 
         sample = entries[0]
@@ -235,8 +254,17 @@ def build_lens_profiles(lcp_dir):
 
             for fnum in sorted(by_aperture.keys()):
                 candidates = by_aperture[fnum]
-                # Pick the entry with the longest focus distance (most "infinity-like")
-                best = max(candidates, key=lambda x: x.get("focus_distance", 0))
+                # Rank by:
+                #   1. lowest residual error (best polynomial fit) — most reliable signal
+                #   2. longest focus distance (closest to infinity, typical shooting)
+                # Entries without a residual report -1 and sort last.
+                def candidate_key(e):
+                    res = e.get("residual_error", -1.0)
+                    # Missing residuals sort after valid ones; valid ones sort ascending
+                    res_key = (1, 0.0) if res < 0 else (0, res)
+                    return (res_key, -e.get("focus_distance", 0.0))
+
+                best = min(candidates, key=candidate_key)
 
                 point = {
                     "focal": focal,
@@ -249,6 +277,15 @@ def build_lens_profiles(lcp_dir):
                     "flx": best["flx"],
                 }
 
+                # Provenance fields — help runtime prefer better calibrations
+                # and (eventually) interpolate across focus distance.
+                res = best.get("residual_error", -1.0)
+                if res >= 0:
+                    point["residual_error"] = res
+                fd = best.get("focus_distance", 0.0)
+                if fd > 0:
+                    point["focus_distance"] = fd
+
                 if "v1" in best:
                     point["v1"] = best["v1"]
                     point["v2"] = best["v2"]
@@ -259,6 +296,14 @@ def build_lens_profiles(lcp_dir):
                     if "vig_cx" in best:
                         point["vig_cx"] = best["vig_cx"]
                         point["vig_cy"] = best["vig_cy"]
+
+                # Chromatic aberration (~25% of LCPs provide this). The per-channel
+                # ScaleFactor is a radial scale relative to green — we emit it as
+                # a per-plane WarpRectilinear on the Rust side.
+                if "ca_red_scale" in best:
+                    point["ca_red_scale"] = best["ca_red_scale"]
+                if "ca_blue_scale" in best:
+                    point["ca_blue_scale"] = best["ca_blue_scale"]
 
                 calibration_points.append(point)
 
@@ -313,10 +358,20 @@ def profile_to_toml(prof):
         lines.append(f"k2 = {fmt_f64(pt['k2'])}")
         lines.append(f"k3 = {fmt_f64(pt['k3'])}")
 
+        if "residual_error" in pt:
+            lines.append(f"residual_error = {fmt_f64(pt['residual_error'])}")
+        if "focus_distance" in pt:
+            lines.append(f"focus_distance = {fmt_f64(pt['focus_distance'])}")
+
         if "v1" in pt:
             lines.append(f"v1 = {fmt_f64(pt['v1'])}")
             lines.append(f"v2 = {fmt_f64(pt['v2'])}")
             lines.append(f"v3 = {fmt_f64(pt['v3'])}")
+
+        if "ca_red_scale" in pt:
+            lines.append(f"ca_red_scale = {fmt_f64(pt['ca_red_scale'])}")
+        if "ca_blue_scale" in pt:
+            lines.append(f"ca_blue_scale = {fmt_f64(pt['ca_blue_scale'])}")
 
     return "\n".join(lines)
 
@@ -355,7 +410,17 @@ def main():
     # Print some stats
     total_cal = sum(len(p["calibration"]) for p in profiles.values())
     with_vig = sum(1 for p in profiles.values() for c in p["calibration"] if "v1" in c)
-    print(f"Total calibration points: {total_cal} ({with_vig} with vignetting)")
+    with_ca = sum(
+        1 for p in profiles.values() for c in p["calibration"]
+        if "ca_red_scale" in c or "ca_blue_scale" in c
+    )
+    with_res = [c["residual_error"] for p in profiles.values() for c in p["calibration"] if "residual_error" in c]
+    print(f"Total calibration points: {total_cal}")
+    print(f"  with vignetting: {with_vig}")
+    print(f"  with chromatic aberration: {with_ca}")
+    if with_res:
+        mean_res = sum(with_res) / len(with_res)
+        print(f"  with residual error reported: {len(with_res)} (mean {mean_res:.6f})")
 
 
 if __name__ == "__main__":

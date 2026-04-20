@@ -37,6 +37,19 @@ pub struct CalibrationPoint {
   pub v1: Option<f64>,
   pub v2: Option<f64>,
   pub v3: Option<f64>,
+  /// Chromatic aberration radial ScaleFactor per channel (relative to green).
+  /// Emitted as a per-plane WarpRectilinear opcode when present.
+  #[serde(default)]
+  pub ca_red_scale: Option<f64>,
+  #[serde(default)]
+  pub ca_blue_scale: Option<f64>,
+  /// ResidualMeanError from LCP: lower = tighter polynomial fit.
+  /// Carried through for provenance; not currently used at lookup time.
+  #[serde(default)]
+  pub residual_error: Option<f64>,
+  /// Subject distance the calibration was captured at (metres).
+  #[serde(default)]
+  pub focus_distance: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,8 +118,12 @@ fn generate_opcodes(
   // which equals the half-diagonal only when center is at (0.5, 0.5).
   // (see DNG SDK dng_lens_correction.h, MaxDistancePointToRect)
   //
-  // For the polynomial 1 + k1*r² + k2*r⁴ + k3*r⁶:
-  //   r_dng = r_adobe * (width * flx) / maxDist
+  // At the same physical pixel: r_dng = r_adobe * ratio, where
+  //   ratio = (width * flx) / maxDist
+  // Equating the two polynomials term-by-term:
+  //   k_dng · r_dng^N = k_adobe · r_adobe^N
+  //                   = k_adobe · (r_dng / ratio)^N
+  // ⇒ k_dng = k_adobe / ratio^N
   let w = dng_width as f64;
   let h = dng_height as f64;
   let cx_px = dist_point.cx * w;
@@ -116,9 +133,9 @@ fn generate_opcodes(
   let max_dist = (dcx * dcx + dcy * dcy).sqrt();
   let ratio = (w * dist_point.flx) / max_dist;
 
-  let kr1 = dist_point.k1 * ratio * ratio;
-  let kr2 = dist_point.k2 * ratio.powi(4);
-  let kr3 = dist_point.k3 * ratio.powi(6);
+  let kr1 = dist_point.k1 / (ratio * ratio);
+  let kr2 = dist_point.k2 / ratio.powi(4);
+  let kr3 = dist_point.k3 / ratio.powi(6);
 
   log::debug!(
     "LCP WarpRectilinear for '{}' @ {:.0}mm f/{:.1}: k1={:.6} k2={:.6} k3={:.6} (ratio={:.4})",
@@ -128,7 +145,31 @@ fn generate_opcodes(
   let kr = [[1.0_f64, kr1, kr2, kr3]];
   let kt = [[0.0_f64, 0.0_f64]];
   let warp_opcode = opcodes::encode_warp_rectilinear(&kr, &kt, dist_point.cx, dist_point.cy, opcodes::FLAG_OPTIONAL);
-  let opcode_list3 = opcodes::encode_opcode_list(&[warp_opcode]);
+  let mut list3_opcodes: Vec<Vec<u8>> = vec![warp_opcode];
+
+  // Chromatic aberration: Adobe stores a radial ScaleFactor per channel
+  // relative to green. DNG readers can express this as a per-plane
+  // WarpRectilinear (3 planes: R, G, B) applied after the distortion opcode.
+  // Only emit when the scales actually differ from identity — tiny amounts
+  // of CA correction aren't worth the extra sampling pass.
+  let sr = dist_point.ca_red_scale.unwrap_or(1.0);
+  let sb = dist_point.ca_blue_scale.unwrap_or(1.0);
+  if (sr - 1.0).abs() > 1e-6 || (sb - 1.0).abs() > 1e-6 {
+    let ca_kr = [
+      [sr, 0.0, 0.0, 0.0],
+      [1.0, 0.0, 0.0, 0.0],
+      [sb, 0.0, 0.0, 0.0],
+    ];
+    let ca_kt = [[0.0_f64, 0.0_f64]; 3];
+    let ca_opcode = opcodes::encode_warp_rectilinear(&ca_kr, &ca_kt, dist_point.cx, dist_point.cy, opcodes::FLAG_OPTIONAL);
+    list3_opcodes.push(ca_opcode);
+    log::debug!(
+      "LCP CA for '{}' @ {:.0}mm: r_scale={:.6} b_scale={:.6}",
+      profile.lens_name, focal_mm, sr, sb
+    );
+  }
+
+  let opcode_list3 = opcodes::encode_opcode_list(&list3_opcodes);
 
   // Vignetting correction
   let opcode_list1 = if let Some(vig_point) = find_vignette_point(&profile.calibration, focal_mm, aperture) {
@@ -152,9 +193,10 @@ fn generate_opcodes(
     let vig_max_dist = (vig_dcx * vig_dcx + vig_dcy * vig_dcy).sqrt();
     let vig_ratio = (w * vig_flx) / vig_max_dist;
 
-    let vk0 = vig_point.v1.unwrap_or(0.0) * vig_ratio.powi(2);
-    let vk1 = vig_point.v2.unwrap_or(0.0) * vig_ratio.powi(4);
-    let vk2 = vig_point.v3.unwrap_or(0.0) * vig_ratio.powi(6);
+    // Same Adobe→DNG conversion as distortion: divide by ratio^(2N).
+    let vk0 = vig_point.v1.unwrap_or(0.0) / vig_ratio.powi(2);
+    let vk1 = vig_point.v2.unwrap_or(0.0) / vig_ratio.powi(4);
+    let vk2 = vig_point.v3.unwrap_or(0.0) / vig_ratio.powi(6);
 
     log::debug!(
       "LCP FixVignetteRadial for '{}' @ {:.0}mm f/{:.1}: k0={:.6} k1={:.6} k2={:.6}",
@@ -209,6 +251,10 @@ fn interpolate_point(points: &[CalibrationPoint], focal: f64, aperture: f64) -> 
     v1: lerp_opt(p_lo.v1, p_hi.v1, t),
     v2: lerp_opt(p_lo.v2, p_hi.v2, t),
     v3: lerp_opt(p_lo.v3, p_hi.v3, t),
+    ca_red_scale: lerp_opt(p_lo.ca_red_scale, p_hi.ca_red_scale, t),
+    ca_blue_scale: lerp_opt(p_lo.ca_blue_scale, p_hi.ca_blue_scale, t),
+    residual_error: None,
+    focus_distance: None,
   }
 }
 
@@ -290,6 +336,10 @@ fn find_vignette_point(points: &[CalibrationPoint], focal: f64, aperture: f64) -
     v1: lerp_opt(p_lo.v1, p_hi.v1, t),
     v2: lerp_opt(p_lo.v2, p_hi.v2, t),
     v3: lerp_opt(p_lo.v3, p_hi.v3, t),
+    ca_red_scale: lerp_opt(p_lo.ca_red_scale, p_hi.ca_red_scale, t),
+    ca_blue_scale: lerp_opt(p_lo.ca_blue_scale, p_hi.ca_blue_scale, t),
+    residual_error: None,
+    focus_distance: None,
   })
 }
 
@@ -365,6 +415,10 @@ fn parse_profile_manual(v: &toml::Value) -> Option<LensProfile> {
       v1: c.get("v1").and_then(|v| v.as_float()),
       v2: c.get("v2").and_then(|v| v.as_float()),
       v3: c.get("v3").and_then(|v| v.as_float()),
+      ca_red_scale: c.get("ca_red_scale").and_then(|v| v.as_float()),
+      ca_blue_scale: c.get("ca_blue_scale").and_then(|v| v.as_float()),
+      residual_error: c.get("residual_error").and_then(|v| v.as_float()),
+      focus_distance: c.get("focus_distance").and_then(|v| v.as_float()),
     });
   }
 
