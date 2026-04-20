@@ -126,13 +126,19 @@ impl DcpProfile {
 ///      c. A file containing "standard" (case-insensitive), excluding "hdr"
 ///         and "v2" — the generic camera Standard calibration.
 ///      d. Same but including "v2" variants.
-///      e. Any file that does NOT contain "monochrome", excluding "hdr"/"v2".
-///      f. Same but including "v2".
-///      g. Any non-monochrome file.
-///      h. The lexicographically first `.dcp` file (last resort).
+///      e. "standard" (includes HDR variants — still a neutral default).
 ///
-/// Monochrome picture-style DCPs are only chosen by the hint path (step a/b)
-/// or as an absolute last resort (step h).
+/// When none of the above hit, `find_dcp` returns `None` rather than
+/// guessing from the camera-specific style variants (Vivid / Natural /
+/// Portrait / Muted / Monotone / …).  Those variants are subjective
+/// looks, not neutral calibrations — picking one arbitrarily ships the
+/// photographer a render that doesn't match what the camera shot.  The
+/// caller is expected to fall back to the TOML `ColorMatrix` /
+/// `ForwardMatrix` pair in that case.
+///
+/// Monochrome DCPs — Adobe ships them as `"Monochrome"` (Canon/Nikon/Sony),
+/// `"Monotone"` (OM Digital Solutions / Olympus), or `"Sepia"`.  The picture-
+/// style hint (a/b) is the only way they will ever be returned.
 pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str, picture_style: Option<&str>) -> Option<PathBuf> {
   // 1. Exact flat match
   let candidate = dcp_dir.join(format!("{}.dcp", unique_camera_model));
@@ -204,24 +210,17 @@ pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str, picture_style: Option
       if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard") && !is_hdr(p)) {
         return Some(p.clone());
       }
-      // e. "standard" (includes HDR variants — still better than Vivid/Landscape)
+      // e. "standard" (includes HDR variants — still a neutral default)
       if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard")) {
         return Some(p.clone());
       }
-      // f. not monochrome, not hdr, not v2
-      if let Some(p) = candidates.iter().find(|p| !fname(p).contains("monochrome") && !is_hdr(p) && !is_v2(p)) {
-        return Some(p.clone());
-      }
-      // g. not monochrome, not hdr
-      if let Some(p) = candidates.iter().find(|p| !fname(p).contains("monochrome") && !is_hdr(p)) {
-        return Some(p.clone());
-      }
-      // h. not monochrome
-      if let Some(p) = candidates.iter().find(|p| !fname(p).contains("monochrome")) {
-        return Some(p.clone());
-      }
-      // i. anything
-      return candidates.into_iter().next();
+
+      // No Standard profile — return None rather than guessing from the
+      // camera-specific style variants (Vivid / Natural / Portrait / Muted /
+      // Monotone / …).  Picking one arbitrarily ships the photographer a
+      // render that doesn't match what the camera shot; falling through to
+      // the TOML ColorMatrix/ForwardMatrix pair is the neutral default.
+      return None;
     }
   }
 
@@ -314,4 +313,119 @@ fn system_dcp_dirs() -> Vec<PathBuf> {
   }
 
   dirs
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Create an isolated empty directory under `std::env::temp_dir()`.
+  /// Returned path is unique per call; caller is responsible for cleanup.
+  fn fresh_tmp_dir(label: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+      "rawler_dcp_{}_{}_{}",
+      std::process::id(),
+      label,
+      id
+    ));
+    // Start from a clean slate even if a previous failed test left residue.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create tmp test dir");
+    dir
+  }
+
+  fn touch(path: &Path) {
+    std::fs::File::create(path).expect("create dcp fixture");
+  }
+
+  #[test]
+  fn no_hint_no_standard_returns_none() {
+    // Regression for the OM-5 Mark II B&W bug: with no picture-style hint
+    // and no "Standard" profile in the model directory, the resolver must
+    // return None rather than guess from the camera-specific style
+    // variants (Vivid / Natural / Portrait / Muted / Monotone …).
+    // Picking one arbitrarily overrides what the photographer shot.
+    let tmp = fresh_tmp_dir("no_standard");
+    let model_dir = tmp.join("OM Digital Solutions OM-5 Mark II");
+    std::fs::create_dir(&model_dir).expect("create model dir");
+    for name in [
+      "OM Digital Solutions OM-5 Mark II Camera Monotone.dcp",
+      "OM Digital Solutions OM-5 Mark II Camera Monotone G Filter.dcp",
+      "OM Digital Solutions OM-5 Mark II Camera Muted.dcp",
+      "OM Digital Solutions OM-5 Mark II Camera Natural.dcp",
+      "OM Digital Solutions OM-5 Mark II Camera Portrait.dcp",
+      "OM Digital Solutions OM-5 Mark II Camera Vivid.dcp",
+    ] {
+      touch(&model_dir.join(name));
+    }
+
+    let picked = find_dcp(&tmp, "OM Digital Solutions OM-5 Mark II", None);
+    assert!(picked.is_none(), "unexpected match: {:?}", picked);
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn standard_profile_wins_without_hint() {
+    // The common Adobe/Canon/Nikon case: a "Camera Standard" variant is a
+    // neutral default and must still be picked when no hint is supplied.
+    let tmp = fresh_tmp_dir("standard_default");
+    let model_dir = tmp.join("Nikon Z f");
+    std::fs::create_dir(&model_dir).expect("create model dir");
+    let vivid = model_dir.join("Nikon Z f Camera Vivid.dcp");
+    let standard = model_dir.join("Nikon Z f Camera Standard.dcp");
+    touch(&vivid);
+    touch(&standard);
+
+    let picked = find_dcp(&tmp, "Nikon Z f", None).expect("should resolve a DCP");
+    assert_eq!(picked, standard);
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn vivid_hint_selects_vivid() {
+    // Explicit picture-style hint beats everything else, including
+    // "Standard" — this is how the caller tells us which look the camera
+    // was actually set to.
+    let tmp = fresh_tmp_dir("vivid_hint");
+    let model_dir = tmp.join("OM Digital Solutions OM-5 Mark II");
+    std::fs::create_dir(&model_dir).expect("create model dir");
+    let vivid = model_dir.join("OM Digital Solutions OM-5 Mark II Camera Vivid.dcp");
+    let natural = model_dir.join("OM Digital Solutions OM-5 Mark II Camera Natural.dcp");
+    touch(&vivid);
+    touch(&natural);
+
+    let picked = find_dcp(
+      &tmp,
+      "OM Digital Solutions OM-5 Mark II",
+      Some("vivid"),
+    )
+    .expect("should resolve a DCP");
+    assert_eq!(picked, vivid);
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn monotone_hint_still_selects_monotone() {
+    // B&W profiles are only ever returned when the hint explicitly asks
+    // for them — mirrors the camera shooting in Monotone mode.
+    let tmp = fresh_tmp_dir("monotone_hint");
+    let model_dir = tmp.join("OM Digital Solutions OM-5 Mark II");
+    std::fs::create_dir(&model_dir).expect("create model dir");
+    let mono = model_dir.join("OM Digital Solutions OM-5 Mark II Camera Monotone.dcp");
+    let natural = model_dir.join("OM Digital Solutions OM-5 Mark II Camera Natural.dcp");
+    touch(&mono);
+    touch(&natural);
+
+    let picked = find_dcp(
+      &tmp,
+      "OM Digital Solutions OM-5 Mark II",
+      Some("monotone"),
+    )
+    .expect("should resolve a DCP");
+    assert_eq!(picked, mono);
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
 }
