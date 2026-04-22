@@ -59,6 +59,16 @@ impl DcpProfile {
       .and_then(|e| e.value.as_string().cloned())
   }
 
+  /// Returns the `UniqueCameraModel` string from the DCP, if present.
+  /// Used to filter the profile list down to just the profiles for the
+  /// camera that shot the image.
+  pub fn unique_camera_model(&self) -> Option<String> {
+    self
+      .ifd
+      .get_entry(DngTag::UniqueCameraModel)
+      .and_then(|e| e.value.as_string().cloned())
+  }
+
   /// Returns the `BaselineExposureOffset` from the DCP as an f64 EV value.
   ///
   /// Adobe bakes this offset into the output DNG's `BaselineExposure` tag
