@@ -542,50 +542,6 @@ impl<'a> Decoder for NefDecoder<'a> {
           Entry { tag: DngTag::MakerNoteSafety.into(), value: Value::Short(vec![1]), embedded: None },
         );
 
-        // Extract NefMeta1 tone curve control points as DNG ProfileToneCurve.
-        // NefMeta1 layout: byte 8 = num_points, bytes 10+ = (input, output) u8 pairs.
-        // The last point is a sentinel (output=0) and is skipped.
-        if let Some(meta1) = self.makernote.get_entry(TiffCommonTag::NefMeta1) {
-          let data = meta1.get_data();
-          if data.len() >= 10 {
-            let num_points = data[8] as usize;
-            if data.len() >= 10 + num_points * 2 {
-              let mut curve_points: Vec<f32> = Vec::new();
-              // Add implicit (0.0, 0.0) start point
-              curve_points.push(0.0);
-              curve_points.push(0.0);
-              for i in 0..num_points {
-                let input = data[10 + i * 2] as f32 / 255.0;
-                let output = data[10 + i * 2 + 1] as f32 / 255.0;
-                // Skip sentinel points (output == 0 with non-zero input)
-                if output == 0.0 && input > 0.0 {
-                  continue;
-                }
-                curve_points.push(input);
-                curve_points.push(output);
-              }
-              // Add implicit (1.0, 1.0) end point if not already present
-              if curve_points.len() >= 2 {
-                let last_in = curve_points[curve_points.len() - 2];
-                let last_out = curve_points[curve_points.len() - 1];
-                if last_in < 1.0 || last_out < 1.0 {
-                  curve_points.push(1.0);
-                  curve_points.push(1.0);
-                }
-              }
-              if curve_points.len() >= 4 {
-                ifd.entries.insert(
-                  DngTag::ProfileToneCurve.into(),
-                  Entry {
-                    tag: DngTag::ProfileToneCurve.into(),
-                    value: Value::Float(curve_points),
-                    embedded: None,
-                  },
-                );
-              }
-            }
-          }
-        }
 
         // Extract ICC profile from source file as AsShotICCProfile.
         if let Some(icc_entry) = self.tiff.get_entry(ExifTag::IccProfile) {
