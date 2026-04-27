@@ -24,7 +24,7 @@ use crate::{
 
 use super::{
   Dim2, Rect, convert_from_f32_scaled_u16,
-  raw::{map_3ch_to_rgb, map_4ch_to_rgb},
+  raw::{map_3ch_to_rgb, map_3ch_to_rgb_unclipped, map_4ch_to_rgb, map_4ch_to_rgb_unclipped},
   sensor::bayer::{bilinear::Bilinear4Channel, ppg::PPGDemosaic},
   xyz::Illuminant,
 };
@@ -72,6 +72,11 @@ pub enum ProcessingStep {
   CropActiveArea,
   WhiteBalance,
   Calibrate,
+  /// Same camera→sRGB matrix application as `Calibrate`, but skips
+  /// `clip_negative` + `clip_euclidean_norm_avg`.  Output stays in
+  /// linear-light sRGB with negatives and >1.0 highlights intact, suitable
+  /// for downstream consumers that do their own gamut mapping.
+  CalibrateUnclipped,
   CropDefault,
   SRgb,
 }
@@ -227,7 +232,9 @@ impl RawDevelop {
       };
     }
 
-    if self.steps.contains(&ProcessingStep::Calibrate) {
+    let do_calibrate = self.steps.contains(&ProcessingStep::Calibrate);
+    let do_calibrate_unclipped = self.steps.contains(&ProcessingStep::CalibrateUnclipped);
+    if do_calibrate || do_calibrate_unclipped {
       let mut xyz2cam: [[f32; 3]; 4] = [[0.0; 3]; 4];
       let d65_matrix: Vec<f32>;
       let (illu, matrix) = rawimage
@@ -278,10 +285,18 @@ impl RawDevelop {
 
       log::debug!("wb: {:?}, coeff: {:?}", wb, xyz2cam);
 
-      intermediate = match intermediate {
-        Intermediate::Monochrome(_) => intermediate,
-        Intermediate::ThreeColor(pixels) => Intermediate::ThreeColor(map_3ch_to_rgb(&pixels, &wb, xyz2cam)),
-        Intermediate::FourColor(pixels) => Intermediate::ThreeColor(map_4ch_to_rgb(&pixels, &wb, xyz2cam)),
+      intermediate = if do_calibrate_unclipped {
+        match intermediate {
+          Intermediate::Monochrome(_) => intermediate,
+          Intermediate::ThreeColor(pixels) => Intermediate::ThreeColor(map_3ch_to_rgb_unclipped(&pixels, &wb, xyz2cam)),
+          Intermediate::FourColor(pixels) => Intermediate::ThreeColor(map_4ch_to_rgb_unclipped(&pixels, &wb, xyz2cam)),
+        }
+      } else {
+        match intermediate {
+          Intermediate::Monochrome(_) => intermediate,
+          Intermediate::ThreeColor(pixels) => Intermediate::ThreeColor(map_3ch_to_rgb(&pixels, &wb, xyz2cam)),
+          Intermediate::FourColor(pixels) => Intermediate::ThreeColor(map_4ch_to_rgb(&pixels, &wb, xyz2cam)),
+        }
       };
     }
 

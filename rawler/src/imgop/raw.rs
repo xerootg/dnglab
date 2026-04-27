@@ -240,6 +240,71 @@ pub(crate) fn map_4ch_to_rgb(src: &Color2D<f32, 4>, wb_coeff: &[f32; 4], xyz2cam
   RgbF32::new_with(out, src.width, src.height)
 }
 
+/// Unclipped variant of [`map_3ch_to_rgb`]: applies WB + camera-to-sRGB
+/// matrix and stops there, leaving negatives and >1.0 highlights intact.
+///
+/// The default `map_3ch_to_rgb` runs `clip_euclidean_norm_avg`, which clips
+/// negatives to zero and bakes in a hue-warping highlight rolloff (good for
+/// rawler's intended u8 sRGB output, wrong for downstream pipelines that want
+/// to do their own gamut mapping in linear-light float).  Lightbox uses this
+/// variant via `ProcessingStep::CalibrateUnclipped` so the GPU shader's
+/// HPMINDE step gets full sensor headroom and out-of-gamut chroma to work
+/// with — the same wide-gamut linear sRGB the wasm-utif browser pipeline
+/// produces.
+#[multiversion(targets("x86_64+avx+avx2", "x86+sse", "aarch64+neon"))]
+pub(crate) fn map_3ch_to_rgb_unclipped(src: &Color2D<f32, 3>, wb_coeff: &[f32; 4], xyz2cam: [[f32; 3]; 4]) -> RgbF32 {
+  let rgb2cam = normalize(multiply(&xyz2cam, &SRGB_TO_XYZ_D65));
+  let cam2rgb = pseudo_inverse(rgb2cam);
+
+  let mut out = Vec::with_capacity(src.data.len());
+
+  src
+    .pixels()
+    .par_iter()
+    .map(|pix| {
+      let r = pix[0] * wb_coeff[0];
+      let g = pix[1] * wb_coeff[1];
+      let b = pix[2] * wb_coeff[2];
+      [
+        cam2rgb[0][0] * r + cam2rgb[0][1] * g + cam2rgb[0][2] * b,
+        cam2rgb[1][0] * r + cam2rgb[1][1] * g + cam2rgb[1][2] * b,
+        cam2rgb[2][0] * r + cam2rgb[2][1] * g + cam2rgb[2][2] * b,
+      ]
+    })
+    .collect_into_vec(&mut out);
+
+  RgbF32::new_with(out, src.width, src.height)
+}
+
+/// Unclipped variant of [`map_4ch_to_rgb`] — see [`map_3ch_to_rgb_unclipped`]
+/// for the rationale.  Only fires for 4-channel CFAs (X-Trans cameras) routed
+/// through the linear-light develop path.
+#[multiversion(targets("x86_64+avx+avx2", "x86+sse", "aarch64+neon"))]
+pub(crate) fn map_4ch_to_rgb_unclipped(src: &Color2D<f32, 4>, wb_coeff: &[f32; 4], xyz2cam: [[f32; 3]; 4]) -> RgbF32 {
+  let rgb2cam = normalize(multiply(&xyz2cam, &SRGB_TO_XYZ_D65));
+  let cam2rgb = pseudo_inverse(rgb2cam);
+
+  let mut out = Vec::with_capacity(src.data.len());
+
+  src
+    .pixels()
+    .par_iter()
+    .map(|pix| {
+      let ch0 = pix[0] * wb_coeff[0];
+      let ch1 = pix[1] * wb_coeff[1];
+      let ch2 = pix[2] * wb_coeff[2];
+      let ch3 = pix[3] * wb_coeff[3];
+      [
+        cam2rgb[0][0] * ch0 + cam2rgb[0][1] * ch1 + cam2rgb[0][2] * ch2 + cam2rgb[0][3] * ch3,
+        cam2rgb[1][0] * ch0 + cam2rgb[1][1] * ch1 + cam2rgb[1][2] * ch2 + cam2rgb[1][3] * ch3,
+        cam2rgb[2][0] * ch0 + cam2rgb[2][1] * ch1 + cam2rgb[2][2] * ch2 + cam2rgb[2][3] * ch3,
+      ]
+    })
+    .collect_into_vec(&mut out);
+
+  RgbF32::new_with(out, src.width, src.height)
+}
+
 /// Collect iterator into array
 pub fn collect_array<T, I, const N: usize>(itr: I) -> [T; N]
 where
