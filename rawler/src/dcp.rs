@@ -115,40 +115,81 @@ impl DcpProfile {
   }
 }
 
+/// Pick the "best" DCP from a candidate set, given an optional camera
+/// picture-style hint.  Shared by every layout-aware branch of `find_dcp`
+/// so the Standard / hint / no-guess policy is identical regardless of
+/// whether the candidates came from a nested `<dir>/<Model>/` or from the
+/// flat-with-style `<dir>/<Model> *.dcp` layout.
+///
+/// Selection order (matches the documented `find_dcp` policy):
+///   a. `picture_style` hint, no "v2" suffix.
+///   b. `picture_style` hint, allowing "v2".
+///   c. `standard`, excluding "hdr" and "v2".
+///   d. `standard`, excluding "hdr".
+///   e. `standard` (includes HDR variants).
+///   * Otherwise `None` — never guess from camera-specific style variants.
+fn select_best_candidate(candidates: &[PathBuf], picture_style: Option<&str>) -> Option<PathBuf> {
+  let fname = |p: &PathBuf| p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+  let is_v2  = |p: &PathBuf| fname(p).contains(" v2.");
+  let is_hdr = |p: &PathBuf| fname(p).contains(" hdr");
+
+  if let Some(style) = picture_style {
+    if let Some(p) = candidates.iter().find(|p| fname(p).contains(style) && !is_v2(p)) {
+      return Some(p.clone());
+    }
+    if let Some(p) = candidates.iter().find(|p| fname(p).contains(style)) {
+      return Some(p.clone());
+    }
+  }
+  if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard") && !is_hdr(p) && !is_v2(p)) {
+    return Some(p.clone());
+  }
+  if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard") && !is_hdr(p)) {
+    return Some(p.clone());
+  }
+  if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard")) {
+    return Some(p.clone());
+  }
+  None
+}
+
 /// Resolve a DCP file path given a profiles directory and a camera's
 /// `UniqueCameraModel` string (e.g. `"Nikon D600"`).
 ///
 /// `picture_style` is an optional lowercase hint from the camera's
 /// Picture-Control / Picture-Style metadata (e.g. `"standard"`, `"vivid"`,
-/// `"monochrome"`).  When provided it is tried first so that the selected
-/// profile matches the look the photographer chose in-camera.
+/// `"monochrome"`, `"flexible color"`).  When provided it is tried first
+/// so that the selected profile matches the look the photographer chose
+/// in-camera.
 ///
 /// Lookup order:
-/// 1. `<dir>/<model>.dcp` — case-sensitive exact match (fast path).
-/// 2. Case-insensitive flat scan for `<model>.dcp` in `<dir>/` (backward compat).
-/// 3. A subdirectory whose name case-insensitively matches `<model>` (Adobe layout:
-///    `<dir>/<Model>/<Model> Camera <Mode>.dcp`).  Within that subdirectory the
-///    "best" profile is chosen:
-///      a. (if `picture_style` is set) A file whose name contains the hint
-///         without a "v2" suffix — e.g. `picture_style = "vivid"` selects
-///         `"Nikon Z f Camera Vivid.dcp"`.
-///      b. (if `picture_style` is set) Same but allowing "v2" variants.
-///      c. A file containing "standard" (case-insensitive), excluding "hdr"
-///         and "v2" — the generic camera Standard calibration.
-///      d. Same but including "v2" variants.
-///      e. "standard" (includes HDR variants — still a neutral default).
+/// 1. `<dir>/<model>.dcp` — case-sensitive exact match (fast path for the
+///    "single profile per model" layout).
+/// 2. Case-insensitive flat scan for `<model>.dcp` in `<dir>/`
+///    (backward compat for the same single-profile layout).
+/// 3. A subdirectory whose name case-insensitively matches `<model>`
+///    (Adobe / Lightroom layout: `<dir>/<Model>/<Model> Camera <Mode>.dcp`).
+///    Within that subdirectory `select_best_candidate` picks the best file.
+/// 4. **Flat-with-style** layout: scan `<dir>/` for `.dcp` files whose name
+///    case-insensitively starts with `<model> ` (note the trailing space —
+///    word-boundary-safe so `"Nikon Z f"` doesn't pick up `"Nikon Z fc …"`).
+///    This covers the common case of a flattened DCP cache built by
+///    rsync-ing every `Camera/*/*.dcp` from an Adobe install into one
+///    directory, which is exactly what the on-device Tauri app's
+///    `dcpprofiles/` ends up looking like.  Same `select_best_candidate`
+///    policy as branch 3.
 ///
 /// When none of the above hit, `find_dcp` returns `None` rather than
 /// guessing from the camera-specific style variants (Vivid / Natural /
-/// Portrait / Muted / Monotone / …).  Those variants are subjective
-/// looks, not neutral calibrations — picking one arbitrarily ships the
+/// Portrait / Muted / Monotone / …).  Those variants are subjective looks,
+/// not neutral calibrations — picking one arbitrarily ships the
 /// photographer a render that doesn't match what the camera shot.  The
 /// caller is expected to fall back to the TOML `ColorMatrix` /
 /// `ForwardMatrix` pair in that case.
 ///
 /// Monochrome DCPs — Adobe ships them as `"Monochrome"` (Canon/Nikon/Sony),
-/// `"Monotone"` (OM Digital Solutions / Olympus), or `"Sepia"`.  The picture-
-/// style hint (a/b) is the only way they will ever be returned.
+/// `"Monotone"` (OM Digital Solutions / Olympus), or `"Sepia"`.  The
+/// picture-style hint is the only way they will ever be returned.
 pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str, picture_style: Option<&str>) -> Option<PathBuf> {
   // 1. Exact flat match
   let candidate = dcp_dir.join(format!("{}.dcp", unique_camera_model));
@@ -197,40 +238,31 @@ pub fn find_dcp(dcp_dir: &Path, unique_camera_model: &str, picture_style: Option
       }
       candidates.sort();
 
-      // Helper: file name in lowercase
-      let fname = |p: &PathBuf| p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-      let is_v2  = |p: &PathBuf| fname(p).contains(" v2.");
-      let is_hdr = |p: &PathBuf| fname(p).contains(" hdr");
+      // Hand off to the shared selector — return whatever it picks (or
+      // `None` to fall through to the next branch / the TOML default).
+      return select_best_candidate(&candidates, picture_style);
+    }
+  }
 
-      // a/b. If the caller knows which picture style was active, try that first.
-      if let Some(style) = picture_style {
-        if let Some(p) = candidates.iter().find(|p| fname(p).contains(style) && !is_v2(p)) {
-          return Some(p.clone());
-        }
-        if let Some(p) = candidates.iter().find(|p| fname(p).contains(style)) {
-          return Some(p.clone());
-        }
+  // 4. Flat-with-style layout: `<dir>/<Model> *.dcp` files directly under
+  // dcp_dir.  Word-boundary prefix match (`<target> `) so `"Nikon Z f"`
+  // doesn't accidentally claim `"Nikon Z fc Camera Standard.dcp"`.
+  let prefix = format!("{} ", target);
+  if let Ok(entries) = std::fs::read_dir(dcp_dir) {
+    let mut candidates: Vec<PathBuf> = entries
+      .flatten()
+      .filter(|e| e.file_type().map_or(false, |ft| ft.is_file()))
+      .map(|e| e.path())
+      .filter(|p| {
+        let lower = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+        lower.ends_with(".dcp") && lower.starts_with(&prefix)
+      })
+      .collect();
+    if !candidates.is_empty() {
+      candidates.sort();
+      if let Some(picked) = select_best_candidate(&candidates, picture_style) {
+        return Some(picked);
       }
-
-      // c. "standard", not hdr, not v2   ("Camera Standard.dcp")
-      if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard") && !is_hdr(p) && !is_v2(p)) {
-        return Some(p.clone());
-      }
-      // d. "standard", not hdr, any variant
-      if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard") && !is_hdr(p)) {
-        return Some(p.clone());
-      }
-      // e. "standard" (includes HDR variants — still a neutral default)
-      if let Some(p) = candidates.iter().find(|p| fname(p).contains("standard")) {
-        return Some(p.clone());
-      }
-
-      // No Standard profile — return None rather than guessing from the
-      // camera-specific style variants (Vivid / Natural / Portrait / Muted /
-      // Monotone / …).  Picking one arbitrarily ships the photographer a
-      // render that doesn't match what the camera shot; falling through to
-      // the TOML ColorMatrix/ForwardMatrix pair is the neutral default.
-      return None;
     }
   }
 
@@ -436,6 +468,99 @@ mod tests {
     )
     .expect("should resolve a DCP");
     assert_eq!(picked, mono);
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  // ── Flat-with-style layout (branch 4) ───────────────────────────────────
+
+  #[test]
+  fn flat_layout_picks_standard_by_default() {
+    // The on-device Tauri DCP cache flattens every `<Model>/<Model> Camera
+    // <Style>.dcp` from an Adobe install into one directory.  Auto-match
+    // must work against that layout — the user's whole 2,800-DCP cache
+    // depends on it.
+    let tmp = fresh_tmp_dir("flat_standard");
+    touch(&tmp.join("Nikon Z f Camera Vivid.dcp"));
+    touch(&tmp.join("Nikon Z f Camera Standard.dcp"));
+    touch(&tmp.join("Nikon Z f Camera Portrait.dcp"));
+
+    let picked = find_dcp(&tmp, "Nikon Z f", None).expect("flat layout should resolve");
+    assert_eq!(picked.file_name().unwrap(), "Nikon Z f Camera Standard.dcp");
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn flat_layout_honours_picture_style_hint() {
+    // PictureControl name on the camera body wins over the "Standard"
+    // default — same policy as the nested layout.
+    let tmp = fresh_tmp_dir("flat_hint");
+    touch(&tmp.join("Nikon Z f Camera Standard.dcp"));
+    touch(&tmp.join("Nikon Z f Camera Flexible Color.dcp"));
+    touch(&tmp.join("Nikon Z f Camera Vivid.dcp"));
+
+    let picked = find_dcp(&tmp, "Nikon Z f", Some("flexible color"))
+      .expect("flat layout should resolve");
+    assert_eq!(picked.file_name().unwrap(), "Nikon Z f Camera Flexible Color.dcp");
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn flat_layout_word_boundary_excludes_z_fc_from_z_f() {
+    // The bug-of-the-week regression: a flattened cache containing both
+    // "Nikon Z f Camera *.dcp" and "Nikon Z fc Camera *.dcp" must not
+    // confuse the two when searching for "Nikon Z f" — the "fc" body is
+    // a different camera with a different sensor / matrix / DCP set.
+    // Word-boundary prefix matching (target + " ") is what enforces this;
+    // a naïve `starts_with(target)` would let Z fc DCPs through.
+    let tmp = fresh_tmp_dir("flat_word_boundary");
+    touch(&tmp.join("Nikon Z fc Camera Standard.dcp"));
+    touch(&tmp.join("Nikon Z fc Camera Vivid.dcp"));
+    // No "Nikon Z f Camera *.dcp" present — the only matches in the dir
+    // are for the Z fc, which find_dcp must reject.
+
+    let picked = find_dcp(&tmp, "Nikon Z f", None);
+    assert!(
+      picked.is_none(),
+      "find_dcp must not pick a Z fc DCP for a Z f body, got {:?}",
+      picked
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn flat_layout_no_standard_returns_none_with_no_hint() {
+    // Same "no guessing from style variants" policy as the nested branch:
+    // if there's no Standard and no hint, return None and let the caller
+    // fall back to the TOML matrices.
+    let tmp = fresh_tmp_dir("flat_no_standard");
+    touch(&tmp.join("OM Digital Solutions OM-5 Mark II Camera Vivid.dcp"));
+    touch(&tmp.join("OM Digital Solutions OM-5 Mark II Camera Natural.dcp"));
+    touch(&tmp.join("OM Digital Solutions OM-5 Mark II Camera Portrait.dcp"));
+    touch(&tmp.join("OM Digital Solutions OM-5 Mark II Camera Monotone.dcp"));
+
+    let picked = find_dcp(&tmp, "OM Digital Solutions OM-5 Mark II", None);
+    assert!(picked.is_none(), "no Standard + no hint must return None, got {:?}", picked);
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn flat_layout_loses_to_nested_when_both_present() {
+    // Branch 3 (nested) runs before branch 4 (flat-with-style).  When
+    // both layouts coexist (e.g. someone partially flattened their
+    // Adobe install) the nested one wins for predictability — that's
+    // the layout Adobe's own installer creates.
+    let tmp = fresh_tmp_dir("flat_vs_nested");
+    let nested = tmp.join("Nikon Z f");
+    std::fs::create_dir(&nested).expect("create nested");
+    touch(&nested.join("Nikon Z f Camera Standard.dcp"));
+    touch(&tmp.join("Nikon Z f Camera Vivid.dcp")); // flat sibling
+
+    let picked = find_dcp(&tmp, "Nikon Z f", None).expect("should resolve a DCP");
+    assert!(
+      picked.starts_with(&nested),
+      "nested branch should win, got {:?}",
+      picked
+    );
     let _ = std::fs::remove_dir_all(&tmp);
   }
 }
