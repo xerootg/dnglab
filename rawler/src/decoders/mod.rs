@@ -333,6 +333,14 @@ pub trait Decoder: Send {
     Ok(None)
   }
 
+  /// Vendor-neutral in-body "recipe" (e.g. Nikon Picture Control / Olympus
+  /// Picture Mode) normalized for seeding editor slider defaults. Returns
+  /// `None` when the format carries no recipe or none could be decoded.
+  /// See [`crate::recipe::Recipe`] and `docs/camera-recipes.md`.
+  fn recipe(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<Option<crate::recipe::Recipe>> {
+    Ok(None)
+  }
+
   fn thumbnail_image(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
     warn!("Decoder has no thumbnail image support");
     Ok(None)

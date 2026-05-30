@@ -443,17 +443,28 @@ where
     dng.exif_ifd_mut().remove_tag(ExifTag::MakerNotes);
   }
 
-  if let Some(mut xpacket) = decoder.xpacket(rawfile, &raw_params)? {
+  {
+    let mut xpacket = decoder.xpacket(rawfile, &raw_params)?;
     // If we injected a DCP profile, update crd:CameraProfile in the XMP to
     // match the profile name so that ACR/Lightroom picks up the right profile.
     if let Some(dcp_path) = &dcp_path {
       if let Ok(profile) = DcpProfile::load(dcp_path) {
         if let Some(name) = profile.profile_name() {
-          xpacket = patch_xmp_camera_profile(xpacket, &name);
+          if let Some(pkt) = xpacket.take() {
+            xpacket = Some(patch_xmp_camera_profile(pkt, &name));
+          }
         }
       }
     }
-    dng.xpacket(&xpacket)?;
+    // Inject the normalized camera recipe (Nikon Picture Control, …) as
+    // lb:recipe JSON so the editor can seed slider defaults on open. Synthesizes
+    // a minimal XMP packet when the source carries none. See docs/camera-recipes.md.
+    if let Some(recipe) = decoder.recipe(rawfile, &raw_params)? {
+      xpacket = inject_recipe_xmp(xpacket, &recipe);
+    }
+    if let Some(pkt) = xpacket {
+      dng.xpacket(&pkt)?;
+    }
   }
 
   if let Some(handle) = original_compress_thread {
@@ -476,6 +487,47 @@ where
 
   Ok(())
 }
+
+/// Build the `<rdf:Description>` XMP fragment carrying the normalized camera
+/// recipe as `lb:recipe` JSON. See `docs/camera-recipes.md`.
+fn recipe_xmp_fragment(recipe: &crate::recipe::Recipe) -> Option<String> {
+  let json = serde_json::to_string(recipe).ok()?;
+  let esc = json.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+  Some(format!(
+    "<rdf:Description rdf:about=\"\" xmlns:lb=\"https://lightbox.photo/ns/recipe/1.0/\"><lb:recipe>{}</lb:recipe></rdf:Description>",
+    esc
+  ))
+}
+
+/// Inject the recipe fragment into an existing XMP packet (before the closing
+/// `</rdf:RDF>`), or synthesize a minimal packet when `xpacket` is `None`.
+/// Returns `None` only if the recipe cannot be serialized.
+fn inject_recipe_xmp(xpacket: Option<Vec<u8>>, recipe: &crate::recipe::Recipe) -> Option<Vec<u8>> {
+  let fragment = recipe_xmp_fragment(recipe)?;
+  match xpacket {
+    Some(bytes) => {
+      if let Some(s) = std::str::from_utf8(&bytes).ok() {
+        if let Some(pos) = s.rfind("</rdf:RDF>") {
+          let mut out = String::with_capacity(s.len() + fragment.len());
+          out.push_str(&s[..pos]);
+          out.push_str(&fragment);
+          out.push_str(&s[pos..]);
+          return Some(out.into_bytes());
+        }
+      }
+      // Unrecognized packet shape: keep the original (recipe not carried).
+      Some(bytes)
+    }
+    None => {
+      let packet = format!(
+        "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">{}</rdf:RDF></x:xmpmeta><?xpacket end=\"w\"?>",
+        fragment
+      );
+      Some(packet.into_bytes())
+    }
+  }
+}
+
 
 /// Replace the value of `crd:CameraProfile` in an XMP byte packet.
 ///

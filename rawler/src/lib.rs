@@ -91,6 +91,7 @@ pub mod pixarray;
 pub mod pumps;
 pub mod rawimage;
 pub mod rawsource;
+pub mod recipe;
 pub mod tags;
 pub mod tiles;
 

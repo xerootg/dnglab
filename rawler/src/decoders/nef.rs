@@ -638,6 +638,35 @@ impl<'a> Decoder for NefDecoder<'a> {
       None // "Auto" / empty → let find_dcp fall through to "prefer Standard"
     }
   }
+
+  fn recipe(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<Option<crate::recipe::Recipe>> {
+    use crate::recipe::{CurveType, Recipe, ToneCurve};
+    let Some(pc_entry) = self.makernote.get_entry(NikonMakernote::PictureControlData) else {
+      return Ok(None);
+    };
+    let Some((version, name, base)) = parse_picture_control(pc_entry.get_data()) else {
+      return Ok(None);
+    };
+    // Prefer Base (the standard preset the control derives from) as the look
+    // label; fall back to Name.
+    let look = if !base.is_empty() { base.clone() } else { name.clone() };
+    let label = if look.is_empty() { "unknown".to_string() } else { look.clone() };
+    let mut recipe = Recipe::new(format!("nikon:{}", label));
+    recipe.source_params = Some(format!("{}/{}", version, name));
+    if look.to_uppercase().contains("MONOCHROME") {
+      recipe.monochrome = Some(true);
+    }
+    recipe.extras.insert("nikon.pictureControl.version".to_string(), version);
+    recipe.extras.insert("nikon.pictureControl.name".to_string(), name);
+    recipe.extras.insert("nikon.pictureControl.base".to_string(), base);
+    // Tone curve from ContrastCurve (MakerNote 0x8c / NefMeta1).
+    if let Some(entry) = self.makernote.get_entry(NikonMakernote::NefMeta1) {
+      if let Some(points) = parse_contrast_curve_points(entry.get_data()) {
+        recipe.tone = Some(ToneCurve { curve_type: CurveType::Spline, points });
+      }
+    }
+    if recipe.is_meaningful() { Ok(Some(recipe)) } else { Ok(None) }
+  }
 }
 
 impl<'a> NefDecoder<'a> {
@@ -1485,4 +1514,105 @@ use super::jpeg_dimensions;
 /// Extract a null-terminated ASCII string from a byte slice.
 fn null_terminated_ascii(bytes: &[u8]) -> String {
   bytes.iter().take_while(|&&b| b != 0).filter(|&&b| b.is_ascii_graphic() || b == b' ').map(|&b| b as char).collect()
+}
+
+// ─── Camera recipe (Picture Control) parsing ─────────────────────────────────
+
+/// Parse the version + name + base strings from a Nikon `PictureControlData`
+/// (MakerNote tag 0x23) blob. Returns `(version, name, base)`.
+fn parse_picture_control(data: &[u8]) -> Option<(String, String, String)> {
+  let version = data.get(0..4)?;
+  let version_str = null_terminated_ascii(version);
+  let (name_range, base_range) = if version.starts_with(b"03") {
+    (8..28usize, 28..48usize)
+  } else {
+    (4..24usize, 24..44usize)
+  };
+  let name = null_terminated_ascii(data.get(name_range)?);
+  let base = null_terminated_ascii(data.get(base_range)?);
+  Some((version_str, name, base))
+}
+
+/// Parse the `ContrastCurve` (MakerNote tag 0x8c / `NefMeta1`) control points
+/// into a flat `[x0,y0,x1,y1,…]` list in `[0,1]` for [`crate::recipe::ToneCurve`].
+///
+/// Layout: byte 8 = number of control points; bytes 10+ are `u8 (input,output)`
+/// pairs. A trailing `(input>0, output==0)` sentinel is dropped. Implicit
+/// `(0,0)`/`(1,1)` endpoints are added when absent.
+fn parse_contrast_curve_points(data: &[u8]) -> Option<Vec<f32>> {
+  if data.len() < 10 {
+    return None;
+  }
+  let num_points = data[8] as usize;
+  if data.len() < 10 + num_points * 2 {
+    return None;
+  }
+  let mut pts: Vec<f32> = Vec::with_capacity((num_points + 2) * 2);
+  pts.push(0.0);
+  pts.push(0.0);
+  for i in 0..num_points {
+    let input = data[10 + i * 2] as f32 / 255.0;
+    let output = data[10 + i * 2 + 1] as f32 / 255.0;
+    if output == 0.0 && input > 0.0 {
+      continue; // sentinel
+    }
+    if input == 0.0 && output == 0.0 {
+      continue; // duplicate of seeded (0,0)
+    }
+    pts.push(input);
+    pts.push(output);
+  }
+  let n = pts.len();
+  if n >= 2 {
+    let last_in = pts[n - 2];
+    let last_out = pts[n - 1];
+    if last_in < 1.0 || last_out < 1.0 {
+      pts.push(1.0);
+      pts.push(1.0);
+    }
+  }
+  if pts.len() >= 4 { Some(pts) } else { None }
+}
+
+#[cfg(test)]
+mod recipe_tests {
+  use super::*;
+
+  #[test]
+  fn picture_control_v3_flexible_color() {
+    let mut d = vec![0u8; 108];
+    d[0..4].copy_from_slice(b"0310");
+    d[8..13].copy_from_slice(b"KG200");
+    d[28..42].copy_from_slice(b"FLEXIBLE COLOR");
+    let (ver, name, base) = parse_picture_control(&d).unwrap();
+    assert_eq!(ver, "0310");
+    assert_eq!(name, "KG200");
+    assert_eq!(base, "FLEXIBLE COLOR");
+  }
+
+  #[test]
+  fn picture_control_v1_offsets() {
+    let mut d = vec![0u8; 68];
+    d[0..4].copy_from_slice(b"0100");
+    d[4..12].copy_from_slice(b"STANDARD");
+    d[24..32].copy_from_slice(b"STANDARD");
+    let (ver, name, base) = parse_picture_control(&d).unwrap();
+    assert_eq!(ver, "0100");
+    assert_eq!(name, "STANDARD");
+    assert_eq!(base, "STANDARD");
+  }
+
+  #[test]
+  fn contrast_curve_ground_truth() {
+    let hex = "493000ff00ff010007000427214b447a7eb1c6e8f1fff500";
+    let d = hex::decode(hex).unwrap();
+    let pts = parse_contrast_curve_points(&d).unwrap();
+    assert_eq!(pts[0], 0.0);
+    assert_eq!(pts[1], 0.0);
+    assert!((pts[2] - 4.0 / 255.0).abs() < 1e-6, "first input {}", pts[2]);
+    assert!((pts[3] - 39.0 / 255.0).abs() < 1e-6, "first output {}", pts[3]);
+    let n = pts.len();
+    assert_eq!(pts[n - 2], 1.0);
+    assert_eq!(pts[n - 1], 1.0);
+  }
 }
