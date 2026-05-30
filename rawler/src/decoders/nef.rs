@@ -665,6 +665,33 @@ impl<'a> Decoder for NefDecoder<'a> {
         recipe.tone = Some(ToneCurve { curve_type: CurveType::Spline, points });
       }
     }
+    // Active D-Lighting (MakerNote 0x0022) is the camera's in-body auto-
+    // brightening (shadow-lift tone map), separate from the picture control.
+    // It is the dominant term that makes the embedded JPEG brighter than a
+    // neutral linear develop. The NEF carries only the LEVEL; the lift curve is
+    // engine-side, so we seed a first-cut EV bump per level (see the brightness
+    // RE note). Wire enum (exiftool Nikon.pm): 0=Off 1=Low 3=Normal 5=High
+    // 7=ExtraHigh 8..11=ExtraHigh1..4 0xffff=Auto.
+    if let Some(entry) = self.makernote.get_entry(NikonMakernote::ActiveDLighting) {
+      let level = entry.force_u16(0);
+      // EV magnitudes calibrated by closed-loop fitting the editor render to the
+      // camera's embedded preview (dnglab `analyze --preview-pixel`): on Z f
+      // ADL-High shots the look is ~pure exposure of +1.3..+1.7 EV (contrast ~0,
+      // saturation ~0). Only Off/High/Auto are seen in samples; rest interpolated.
+      let ev = match level {
+        0 => 0.0,        // Off
+        1 => 0.5,        // Low
+        3 => 0.8,        // Normal
+        5 => 1.3,        // High (fit: +1.3..+1.66 on samples)
+        7..=11 => 1.6,   // ExtraHigh / ExtraHigh1..4
+        0xffff => 1.0,   // Auto (scene-dependent; conservative mid bump)
+        _ => 0.0,
+      };
+      recipe.extras.insert("nikon.activeDLighting".to_string(), level.to_string());
+      if ev != 0.0 {
+        recipe.exposure = Some(ev);
+      }
+    }
     if recipe.is_meaningful() { Ok(Some(recipe)) } else { Ok(None) }
   }
 }
@@ -1440,6 +1467,11 @@ pub enum NikonMakernote {
   PreviewIFD = 0x0011,
   NrwWB = 0x0014,
   NefSerial = 0x001d,
+  /// Active D-Lighting level (SHORT). exiftool Nikon.pm enum:
+  /// 0=Off 1=Low 3=Normal 5=High 7=ExtraHigh 8..11=ExtraHigh1..4 0xffff=Auto.
+  /// The camera's in-body shadow-lift auto-brightening; seeded as an exposure
+  /// bump in the recipe (see `recipe()` + the brightness RE note).
+  ActiveDLighting = 0x0022,
   /// Picture Control Data (binary blob, version-dependent size).
   /// Version "03xx" (PictureControl3, 108 bytes):
   ///   Byte 8..=27: Picture Control Name (null-terminated ASCII, max 20 bytes).

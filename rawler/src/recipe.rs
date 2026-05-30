@@ -113,6 +113,12 @@ pub struct Recipe {
   pub levels: Option<Levels>,
 
   // --- scalar adjustments (neutral 0; roughly [-1,1] unless noted) ---
+  /// Exposure/brightness seed in EV stops (neutral 0). Carries the in-body
+  /// auto-brightening that is NOT part of the tone curve — e.g. Nikon Active
+  /// D-Lighting's shadow lift, mapped to an EV bump per level. The editor
+  /// seeds its exposure slider from this. See `docs/camera-recipes.md`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub exposure: Option<f32>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub contrast: Option<f32>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,6 +207,7 @@ impl Recipe {
   pub fn is_meaningful(&self) -> bool {
     self.tone.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
       || self.levels.is_some()
+      || self.exposure.is_some()
       || self.contrast.is_some()
       || self.brightness.is_some()
       || self.highlights.is_some()
