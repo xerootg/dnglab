@@ -459,7 +459,28 @@ where
     // Inject the normalized camera recipe (Nikon Picture Control, …) as
     // lb:recipe JSON so the editor can seed slider defaults on open. Synthesizes
     // a minimal XMP packet when the source carries none. See docs/camera-recipes.md.
-    if let Some(recipe) = decoder.recipe(rawfile, &raw_params)? {
+    if let Some(mut recipe) = decoder.recipe(rawfile, &raw_params)? {
+      // Measure the in-body look directly: fit per-channel display-space curves
+      // from a neutral develop to the camera's embedded JPEG preview, and carry
+      // them in the recipe. This reproduces tone + colour + WB + Active
+      // D-Lighting's global component far more faithfully than the static
+      // ADL-level EV seed (which it supersedes). Best-effort: a failure here
+      // leaves the metadata-only recipe intact. See the ADL design note.
+      if recipe.color_curves.is_none() {
+        let neutral = RawDevelop::default()
+          .develop_intermediate(&rawimage)
+          .ok()
+          .and_then(|img| img.to_dynamic_image());
+        let preview = decoder.preview_image(rawfile, &raw_params).ok().flatten();
+        if let (Some(neutral), Some(preview)) = (neutral, preview) {
+          if let Some(curves) = fit_color_curves(&neutral, &preview) {
+            recipe.color_curves = Some(curves);
+            // The measured curves carry the brightening; drop the static EV seed
+            // so the two don't stack (one-lane rule).
+            recipe.exposure = None;
+          }
+        }
+      }
       xpacket = inject_recipe_xmp(xpacket, &recipe);
     }
     if let Some(pkt) = xpacket {
@@ -486,6 +507,133 @@ where
   dng.close()?;
 
   Ok(())
+}
+
+/// Fit per-channel display-space R/G/B curves mapping a *neutral* develop to the
+/// camera's own embedded JPEG preview. With the editor's look sliders at default,
+/// the pristine-open render reduces to `srgb_encode(neutral linear)` followed by
+/// these per-channel RGB curves (the shader's row-1 lane), so seeding them makes
+/// the editor open matching the in-body JPEG — capturing tone + colour + WB +
+/// Active D-Lighting's global component in one measured, portable primitive.
+///
+/// Both inputs are display-referred sRGB. Returns `None` when the inputs are
+/// unusable or the fit is degenerate. See `docs/camera-recipes.md` and the ADL
+/// design note. Method (validated offline, MAE ~2-4 vs preview): downsample both
+/// to a common grid, pair pixels, quantile-bin by the neutral value, take the
+/// mean preview value per bin, enforce monotonicity, anchor the endpoints toward
+/// identity so out-of-sample highlights don't clip.
+fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<[crate::recipe::ToneCurve; 3]> {
+  use crate::recipe::{CurveType, ToneCurve};
+  // Common low-res grid: cheap, robust, and statistically ample (~44k samples).
+  const FW: u32 = 256;
+  const FH: u32 = 171;
+  const NB: usize = 24; // quantile bins per channel
+  let n = neutral.resize_exact(FW, FH, image::imageops::FilterType::Triangle).to_rgb8();
+  let p = preview.resize_exact(FW, FH, image::imageops::FilterType::Triangle).to_rgb8();
+  let np = n.as_raw();
+  let pp = p.as_raw();
+  if np.len() != pp.len() || np.len() < (NB * 3 * 8) {
+    return None;
+  }
+  let px = (FW * FH) as usize;
+
+  let fit_channel = |c: usize| -> ToneCurve {
+    // Collect (base, prev) pairs in [0,1] for this channel.
+    let mut pairs: Vec<(f32, f32)> = Vec::with_capacity(px);
+    for i in 0..px {
+      let b = np[i * 3 + c] as f32 / 255.0;
+      let q = pp[i * 3 + c] as f32 / 255.0;
+      pairs.push((b, q));
+    }
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // Quantile bins: equal sample counts, so dark frames still get resolution.
+    let mut ctrl: Vec<(f32, f32)> = Vec::with_capacity(NB + 2);
+    let per = pairs.len() / NB;
+    if per == 0 {
+      return ToneCurve { curve_type: CurveType::Empty, points: vec![] };
+    }
+    let mut last_y = 0.0f32;
+    for bin in 0..NB {
+      let lo = bin * per;
+      let hi = if bin == NB - 1 { pairs.len() } else { (bin + 1) * per };
+      let cnt = (hi - lo) as f32;
+      let mut sx = 0.0f32;
+      let mut sy = 0.0f32;
+      for pr in &pairs[lo..hi] {
+        sx += pr.0;
+        sy += pr.1;
+      }
+      let cx = sx / cnt;
+      let mut cy = sy / cnt;
+      // Monotone (cummax) so the curve never inverts.
+      if cy < last_y {
+        cy = last_y;
+      }
+      last_y = cy;
+      // Skip near-duplicate x (keeps spline well-conditioned).
+      if let Some(&(px_, _)) = ctrl.last() {
+        if cx - px_ < 1.0 / 512.0 {
+          if let Some(lastp) = ctrl.last_mut() {
+            lastp.1 = cy;
+          }
+          continue;
+        }
+      }
+      ctrl.push((cx, cy));
+    }
+    if ctrl.len() < 2 {
+      return ToneCurve { curve_type: CurveType::Empty, points: vec![] };
+    }
+    // The control points so far are at QUANTILE x positions (dense in the
+    // populated tonal region). The editor interpolates the stored knots with a
+    // NATURAL CUBIC SPLINE, which overshoots/rings between closely-spaced x
+    // knots — so we must hand it UNIFORMLY-spaced knots instead. Resample the
+    // monotone quantile fit (piecewise-linear between the quantile knots, which
+    // is ring-free and what we validated against) onto NK uniform x in [0,1].
+    // Below the first / above the last observed tone we extrapolate toward
+    // identity so out-of-sample shadows/highlights stay sane on other scenes.
+    const NK: usize = 16;
+    let (xf, yf) = ctrl[0];
+    let (xl, yl) = *ctrl.last().unwrap();
+    let interp = |x: f32| -> f32 {
+      if x <= xf {
+        // toward (0,0)-relative identity: keep the measured offset at xf.
+        return (yf - (xf - x)).clamp(0.0, 1.0);
+      }
+      if x >= xl {
+        // identity slope (+1) above the brightest measured tone.
+        return (yl + (x - xl)).clamp(0.0, 1.0);
+      }
+      // piecewise-linear lookup within the monotone quantile knots.
+      let mut j = 0;
+      while j + 1 < ctrl.len() && ctrl[j + 1].0 < x {
+        j += 1;
+      }
+      let (xa, ya) = ctrl[j];
+      let (xb, yb) = ctrl[j + 1];
+      let t = if xb > xa { (x - xa) / (xb - xa) } else { 0.0 };
+      (ya + t * (yb - ya)).clamp(0.0, 1.0)
+    };
+    let mut points = Vec::with_capacity(NK * 2);
+    let mut last_y = 0.0f32;
+    for k in 0..NK {
+      let x = k as f32 / (NK - 1) as f32;
+      let mut y = interp(x);
+      if y < last_y {
+        y = last_y; // keep monotone after resample
+      }
+      last_y = y;
+      points.push(x);
+      points.push(y);
+    }
+    ToneCurve { curve_type: CurveType::Spline, points }
+  };
+
+  let curves = [fit_channel(0), fit_channel(1), fit_channel(2)];
+  if curves.iter().all(|t| t.is_empty()) {
+    return None;
+  }
+  Some(curves)
 }
 
 /// Build the `<rdf:Description>` XMP fragment carrying the normalized camera

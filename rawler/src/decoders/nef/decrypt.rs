@@ -30,8 +30,10 @@ pub(super) fn nef_decrypt(buf: &mut [u8], start: usize, makernote: &IFD) -> Resu
   let mut cj = WB_KEYMAP[keyno & 0xff] as u32;
   let mut ck = 0x60_u32;
   for i in 0..src.len() {
-    cj += ci * ck;
-    ck += 1;
+    // Nikon's cipher is modular in u32; use wrapping arithmetic explicitly so
+    // debug builds (overflow checks on) don't panic on the intended overflow.
+    cj = cj.wrapping_add(ci.wrapping_mul(ck));
+    ck = ck.wrapping_add(1);
     src[i] ^= cj as u8;
   }
   Ok(())

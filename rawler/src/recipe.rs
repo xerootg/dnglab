@@ -112,6 +112,19 @@ pub struct Recipe {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub levels: Option<Levels>,
 
+  /// Per-channel R/G/B curves in **display space** (sRGB-display input →
+  /// sRGB-display output, control points in `[0,1]×[0,1]`). Unlike [`tone`]
+  /// (scene-linear, the picture-control look), these are *measured* at convert
+  /// time as the transform from a neutral develop to the camera's own embedded
+  /// JPEG preview — they capture the in-body look (tone + colour + WB + Active
+  /// D-Lighting's global component) in one portable primitive. The editor seeds
+  /// its per-channel RGB curves (`colorRed/colorGreen/colorBlue`) from these,
+  /// which it applies in display space at the end of its pipeline — so the
+  /// pristine-open render matches the embedded JPEG. `[R, G, B]` order; any
+  /// channel may be `Empty` (identity). See `docs/camera-recipes.md`.
+  #[serde(rename = "colorCurves", skip_serializing_if = "Option::is_none")]
+  pub color_curves: Option<[ToneCurve; 3]>,
+
   // --- scalar adjustments (neutral 0; roughly [-1,1] unless noted) ---
   /// Exposure/brightness seed in EV stops (neutral 0). Carries the in-body
   /// auto-brightening that is NOT part of the tone curve — e.g. Nikon Active
@@ -206,6 +219,7 @@ impl Recipe {
   /// Producers should skip emitting an empty recipe.
   pub fn is_meaningful(&self) -> bool {
     self.tone.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+      || self.color_curves.as_ref().map(|c| c.iter().any(|t| !t.is_empty())).unwrap_or(false)
       || self.levels.is_some()
       || self.exposure.is_some()
       || self.contrast.is_some()
