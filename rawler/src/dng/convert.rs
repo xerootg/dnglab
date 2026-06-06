@@ -473,7 +473,12 @@ where
           .and_then(|img| img.to_dynamic_image());
         let preview = decoder.preview_image(rawfile, &raw_params).ok().flatten();
         if let (Some(neutral), Some(preview)) = (neutral, preview) {
-          if let Some(curves) = fit_color_curves(&neutral, &preview) {
+          // `fit_color_curves` now also returns a saturation-compensation value
+          // (added in bd43f46f), but the consumer wiring for it was never landed,
+          // so this call site discards it for now — keeping the prior
+          // tone-curves-only behaviour. Wire `_sat_comp` into the recipe
+          // (e.g. recipe.saturation) once the intended mapping is decided.
+          if let Some((curves, _sat_comp)) = fit_color_curves(&neutral, &preview) {
             recipe.color_curves = Some(curves);
             // The measured curves carry the brightening; drop the static EV seed
             // so the two don't stack (one-lane rule).
