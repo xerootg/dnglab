@@ -473,16 +473,22 @@ where
           .and_then(|img| img.to_dynamic_image());
         let preview = decoder.preview_image(rawfile, &raw_params).ok().flatten();
         if let (Some(neutral), Some(preview)) = (neutral, preview) {
-          // `fit_color_curves` now also returns a saturation-compensation value
-          // (added in bd43f46f), but the consumer wiring for it was never landed,
-          // so this call site discards it for now — keeping the prior
-          // tone-curves-only behaviour. Wire `_sat_comp` into the recipe
-          // (e.g. recipe.saturation) once the intended mapping is decided.
-          if let Some((curves, _sat_comp)) = fit_color_curves(&neutral, &preview) {
+          if let Some((curves, sat_comp)) = fit_color_curves(&neutral, &preview) {
             recipe.color_curves = Some(curves);
             // The measured curves carry the brightening; drop the static EV seed
             // so the two don't stack (one-lane rule).
             recipe.exposure = None;
+            // Per-channel 1D curves regress chroma toward each channel's
+            // conditional mean, so the seeded open comes out slightly
+            // undersaturated vs the camera JPEG. `fit_color_curves` measures that
+            // deficit as the editor's normalized saturation factor (neutral 0,
+            // same convention as `Recipe.saturation`); seed the saturation lane
+            // with it so the pristine open restores the JPEG's chroma. Only set
+            // it when there's a real deficit to compensate (sat_comp clamps to
+            // [0, 0.4]; ~0 means the curves already matched).
+            if sat_comp > 0.0 {
+              recipe.saturation = Some(sat_comp);
+            }
           }
         }
       }
