@@ -473,22 +473,16 @@ where
           .and_then(|img| img.to_dynamic_image());
         let preview = decoder.preview_image(rawfile, &raw_params).ok().flatten();
         if let (Some(neutral), Some(preview)) = (neutral, preview) {
-          if let Some((curves, sat_comp)) = fit_color_curves(&neutral, &preview) {
+          if let Some(curves) = fit_color_curves(&neutral, &preview) {
             recipe.color_curves = Some(curves);
             // The measured curves carry the brightening; drop the static EV seed
             // so the two don't stack (one-lane rule).
             recipe.exposure = None;
-            // Per-channel 1D curves regress chroma toward each channel's
-            // conditional mean, so the seeded open comes out slightly
-            // undersaturated vs the camera JPEG. `fit_color_curves` measures that
-            // deficit as the editor's normalized saturation factor (neutral 0,
-            // same convention as `Recipe.saturation`); seed the saturation lane
-            // with it so the pristine open restores the JPEG's chroma. Only set
-            // it when there's a real deficit to compensate (sat_comp clamps to
-            // [0, 0.4]; ~0 means the curves already matched).
-            if sat_comp > 0.0 {
-              recipe.saturation = Some(sat_comp);
-            }
+            // Safety guard: the per-channel colorCurves are the look carrier, so a
+            // stale display-space NEF ContrastCurve in `recipe.tone` (from nef.rs)
+            // must never survive into the emitted recipe — the editor would feed it
+            // to the linear lumPoints lane and double-encode it. Clear it here.
+            recipe.tone = None;
           }
         }
       }
@@ -533,7 +527,7 @@ where
 /// to a common grid, pair pixels, quantile-bin by the neutral value, take the
 /// mean preview value per bin, enforce monotonicity, anchor the endpoints toward
 /// identity so out-of-sample highlights don't clip.
-fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<([crate::recipe::ToneCurve; 3], f32)> {
+fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<[crate::recipe::ToneCurve; 3]> {
   use crate::recipe::{CurveType, ToneCurve};
   // Common low-res grid: cheap, robust, and statistically ample (~44k samples).
   const FW: u32 = 256;
@@ -644,55 +638,7 @@ fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<([
   if curves.iter().all(|t| t.is_empty()) {
     return None;
   }
-
-  // Per-channel 1D curves regress each channel toward its conditional mean,
-  // which compresses chroma — the rendered image comes out slightly
-  // undersaturated vs the camera JPEG. Measure that deficit here and return a
-  // matching global-saturation compensation (the editor has a saturation lane)
-  // so the seeded open restores the camera's saturation. Compensation is the
-  // editor's normalized factor s in [0,1] solving (1 - 1/(1.001 - s)) = 1 - R,
-  // i.e. s = 1.001 - 1/R, where R = mean_sat(preview) / mean_sat(curve output).
-  let eval = |tc: &ToneCurve, x: f32| -> f32 {
-    let p = &tc.points;
-    if p.len() < 4 {
-      return x;
-    }
-    if x <= p[0] {
-      return p[1];
-    }
-    let mut i = 0;
-    while i + 3 < p.len() && p[i + 2] < x {
-      i += 2;
-    }
-    let (xa, ya, xb, yb) = (p[i], p[i + 1], p[i + 2], p[i + 3]);
-    if xb <= xa {
-      return yb;
-    }
-    let t = (x - xa) / (xb - xa);
-    ya + t * (yb - ya)
-  };
-  let hsv_sat = |r: f32, g: f32, b: f32| -> f32 {
-    let mx = r.max(g).max(b);
-    let mn = r.min(g).min(b);
-    if mx > 1e-6 { (mx - mn) / mx } else { 0.0 }
-  };
-  let (mut sum_out, mut sum_prev) = (0.0f64, 0.0f64);
-  for i in 0..px {
-    let (br, bg, bb) = (np[i * 3] as f32 / 255.0, np[i * 3 + 1] as f32 / 255.0, np[i * 3 + 2] as f32 / 255.0);
-    let or = eval(&curves[0], br);
-    let og = eval(&curves[1], bg);
-    let ob = eval(&curves[2], bb);
-    sum_out += hsv_sat(or, og, ob) as f64;
-    let (pr, pg, pb) = (pp[i * 3] as f32 / 255.0, pp[i * 3 + 1] as f32 / 255.0, pp[i * 3 + 2] as f32 / 255.0);
-    sum_prev += hsv_sat(pr, pg, pb) as f64;
-  }
-  let sat_comp = if sum_out > 1e-6 {
-    let r = (sum_prev / sum_out) as f32;
-    (1.001 - 1.0 / r.max(1e-3)).clamp(0.0, 0.4)
-  } else {
-    0.0
-  };
-  Some((curves, sat_comp))
+  Some(curves)
 }
 
 /// Build the `<rdf:Description>` XMP fragment carrying the normalized camera
