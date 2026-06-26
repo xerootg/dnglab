@@ -192,6 +192,69 @@ fn raw_metadata(py: Python<'_>, raw_path: &str) -> PyResult<Py<PyDict>> {
     Ok(dict.cast_into::<PyDict>()?.unbind())
 }
 
+/// Compute DNG-space lens-correction coefficients from Adobe LCP calibration
+/// points.
+///
+/// This is the canonical Adobe PerspectiveModel v2 → DNG WarpRectilinear /
+/// FixVignetteRadial conversion, implemented once in
+/// ``rawler::lens_profiles::calibration_coeffs``. The backend's LCP database
+/// (``backend/utils/lcp_db.py``) calls this instead of duplicating the math.
+///
+/// Parameters
+/// ----------
+/// points_json : str
+///     JSON array of Adobe LCP calibration points (a profile's ``calibration``
+///     list). Each point has focal/aperture/flx/cx/cy/k1/k2/k3 and optionally
+///     v1/v2/v3, ca_red_scale/ca_blue_scale, and vig_flx/vig_cx/vig_cy.
+/// focal : float or None
+///     Focal length in mm. ``None`` uses the first calibration point verbatim
+///     (the EXIF-less case).
+/// aperture : float or None
+///     Aperture f-number. ``None`` uses the first point at the chosen focal.
+/// width : int
+///     Output DNG image width in pixels (the normalisation is pixel-dependent).
+/// height : int
+///     Output DNG image height in pixels.
+///
+/// Returns
+/// -------
+/// dict or None
+///     ``{"distortion": {"k", "kt", "cx", "cy"}, "tca"?: {"kr", "kb"},
+///     "vignetting"?: {"k", "cx", "cy"}}`` or ``None`` when there are no
+///     calibration points or the dimensions are zero.
+#[pyfunction]
+#[pyo3(signature = (points_json, focal, aperture, width, height))]
+fn lcp_dng_calibration(
+    py: Python<'_>,
+    points_json: &str,
+    focal: Option<f64>,
+    aperture: Option<f64>,
+    width: u32,
+    height: u32,
+) -> PyResult<Option<Py<PyDict>>> {
+    let cal = py
+        .detach(|| -> Result<Option<rawler::lens_profiles::DngLensCalibration>, String> {
+            let points: Vec<rawler::lens_profiles::CalibrationPoint> =
+                serde_json::from_str(points_json).map_err(|e| e.to_string())?;
+            Ok(rawler::lens_profiles::calibration_coeffs(
+                &points, focal, aperture, width, height,
+            ))
+        })
+        .map_err(|e| PyRuntimeError::new_err(format!("LCP calibration failed: {e}")))?;
+
+    match cal {
+        None => Ok(None),
+        Some(c) => {
+            let json_str = serde_json::to_string(&c)
+                .map_err(|e| PyRuntimeError::new_err(format!("Serialization failed: {e}")))?;
+            // Parse JSON string into a Python dict via the json stdlib module.
+            let json_mod = py.import("json")?;
+            let dict = json_mod.call_method1("loads", (&json_str,))?;
+            Ok(Some(dict.cast_into::<PyDict>()?.unbind()))
+        }
+    }
+}
+
 /// Return the list of supported RAW file extensions (upper-case).
 #[pyfunction]
 fn supported_extensions() -> Vec<String> {
@@ -446,5 +509,6 @@ fn dnglab_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(raw_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(extract_preview, m)?)?;
     m.add_function(wrap_pyfunction!(embed_exif, m)?)?;
+    m.add_function(wrap_pyfunction!(lcp_dng_calibration, m)?)?;
     Ok(())
 }

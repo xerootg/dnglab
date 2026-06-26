@@ -12,7 +12,7 @@
 //! actual DNG image dimensions.
 
 use lazy_static::lazy_static;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::dng::opcodes;
 
@@ -50,6 +50,17 @@ pub struct CalibrationPoint {
   /// Subject distance the calibration was captured at (metres).
   #[serde(default)]
   pub focus_distance: Option<f64>,
+  /// Optional per-vignette-model centre / focal-length-x overrides. Adobe LCP
+  /// files can ship a vignette model whose centre and FocalLengthX differ from
+  /// the distortion model's; when present these are used for the FixVignette
+  /// radial normalisation instead of `cx`/`cy`/`flx`. Absent in every profile
+  /// shipped today, so this is a latent superset over the current data.
+  #[serde(default)]
+  pub vig_flx: Option<f64>,
+  #[serde(default)]
+  pub vig_cx: Option<f64>,
+  #[serde(default)]
+  pub vig_cy: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,6 +78,152 @@ pub struct LensProfile {
 pub struct LensOpcodes {
   pub opcode_list1: Vec<u8>,
   pub opcode_list3: Vec<u8>,
+}
+
+/// DNG WarpRectilinear distortion coefficients (single plane), already
+/// converted out of Adobe PerspectiveModel v2 space.
+#[derive(Debug, Clone, Serialize)]
+pub struct DngDistortion {
+  /// `[1.0, k1/ratio², k2/ratio⁴, k3/ratio⁶]`.
+  pub k: [f64; 4],
+  /// Tangential terms (always `[0.0, 0.0]` for Adobe radial models).
+  pub kt: [f64; 2],
+  pub cx: f64,
+  pub cy: f64,
+}
+
+/// DNG transverse chromatic-aberration radial scale factors (green = 1.0).
+#[derive(Debug, Clone, Serialize)]
+pub struct DngTca {
+  pub kr: f64,
+  pub kb: f64,
+}
+
+/// DNG FixVignetteRadial coefficients. The trailing two entries are always
+/// `0.0` (Adobe vignette models only carry three radial terms).
+#[derive(Debug, Clone, Serialize)]
+pub struct DngVignette {
+  pub k: [f64; 5],
+  pub cx: f64,
+  pub cy: f64,
+}
+
+/// The full set of DNG-space lens-correction coefficients for one shooting
+/// configuration. This is the single canonical Adobe→DNG conversion: the DNG
+/// opcode-byte path ([`generate_opcodes`]) and the numeric path consumed by the
+/// backend's `/calibration` endpoint (via the `dnglab_py` binding) both derive
+/// from it.
+///
+/// Serialises to exactly the dict shape the frontend's uniform compiler reads:
+/// `{distortion:{k,kt,cx,cy}, tca?:{kr,kb}, vignetting?:{k,cx,cy}}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct DngLensCalibration {
+  pub distortion: DngDistortion,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub tca: Option<DngTca>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub vignetting: Option<DngVignette>,
+}
+
+/// DNG normalisation ratio: `(w·flx) / MaxDistancePointToRect(centre, rect)`.
+///
+/// `MaxDistancePointToRect` is the farthest corner distance from the optical
+/// centre, which equals the half-diagonal only when the centre sits at
+/// `(0.5, 0.5)`. Guards a zero max-distance the same way the reference Python
+/// implementation did (degenerate centres/dimensions → ratio 1.0).
+fn dng_ratio(cx: f64, cy: f64, flx: f64, w: f64, h: f64) -> f64 {
+  let cx_px = cx * w;
+  let cy_px = cy * h;
+  let dcx = cx_px.max(w - cx_px);
+  let dcy = cy_px.max(h - cy_px);
+  let max_dist = (dcx * dcx + dcy * dcy).sqrt();
+  if max_dist <= 0.0 {
+    1.0
+  } else {
+    (w * flx) / max_dist
+  }
+}
+
+/// Compute DNG-space lens-correction coefficients for the given calibration
+/// points and shooting parameters. This is the canonical Adobe PerspectiveModel
+/// v2 → DNG WarpRectilinear / FixVignetteRadial conversion.
+///
+/// `focal` / `aperture` are optional to mirror the EXIF-less case: a `None`
+/// focal uses the first calibration point verbatim (no interpolation); a `None`
+/// aperture takes the first point at the chosen focal length.
+///
+/// Returns `None` when there are no calibration points or the output
+/// dimensions are zero (matching the backend `get_calibration` guards).
+///
+/// Note the chromatic-aberration semantics: a `tca` entry is emitted whenever
+/// *either* `ca_red_scale` or `ca_blue_scale` is present — even at an identity
+/// scale of 1.0 — to preserve the backend `/calibration` API contract. The DNG
+/// opcode-byte path keeps its own `>1e-6` identity threshold in
+/// [`generate_opcodes`]; that threshold is intentionally *not* applied here.
+pub fn calibration_coeffs(
+  points: &[CalibrationPoint],
+  focal: Option<f64>,
+  aperture: Option<f64>,
+  width: u32,
+  height: u32,
+) -> Option<DngLensCalibration> {
+  if points.is_empty() || width == 0 || height == 0 {
+    return None;
+  }
+  let w = width as f64;
+  let h = height as f64;
+
+  // Distortion. Adobe normalises r by (w·flx); DNG by MaxDistancePointToRect.
+  // At the same physical pixel r_dng = r_adobe·ratio, so k_dng = k_adobe/ratioᴺ.
+  let dist = interpolate_point(points, focal, aperture);
+  let ratio = dng_ratio(dist.cx, dist.cy, dist.flx, w, h);
+  let distortion = DngDistortion {
+    k: [
+      1.0,
+      dist.k1 / (ratio * ratio),
+      dist.k2 / ratio.powi(4),
+      dist.k3 / ratio.powi(6),
+    ],
+    kt: [0.0, 0.0],
+    cx: dist.cx,
+    cy: dist.cy,
+  };
+
+  // Chromatic aberration: linear per-channel radial scale relative to green.
+  // Emitted whenever either scale is present (no identity threshold here).
+  let tca = if dist.ca_red_scale.is_some() || dist.ca_blue_scale.is_some() {
+    Some(DngTca {
+      kr: dist.ca_red_scale.unwrap_or(1.0),
+      kb: dist.ca_blue_scale.unwrap_or(1.0),
+    })
+  } else {
+    None
+  };
+
+  // Vignetting: uses its own centre/flx overrides when the profile provides
+  // them, otherwise the distortion centre/flx.
+  let vignetting = match find_vignette_point(points, focal, aperture) {
+    Some(vig) if vig.v1.is_some() => {
+      let vig_cx = vig.vig_cx.unwrap_or(vig.cx);
+      let vig_cy = vig.vig_cy.unwrap_or(vig.cy);
+      let vig_flx = vig.vig_flx.unwrap_or(vig.flx);
+      let vr = dng_ratio(vig_cx, vig_cy, vig_flx, w, h);
+      Some(DngVignette {
+        k: [
+          vig.v1.unwrap_or(0.0) / vr.powi(2),
+          vig.v2.unwrap_or(0.0) / vr.powi(4),
+          vig.v3.unwrap_or(0.0) / vr.powi(6),
+          0.0,
+          0.0,
+        ],
+        cx: vig_cx,
+        cy: vig_cy,
+      })
+    }
+    _ => None,
+  };
+
+  Some(DngLensCalibration { distortion, tca, vignetting })
 }
 
 /// Look up a lens profile by name and generate DNG opcodes for the given
@@ -102,108 +259,61 @@ fn generate_opcodes(
   dng_width: u32,
   dng_height: u32,
 ) -> Option<LensOpcodes> {
-  if profile.calibration.is_empty() {
-    return None;
-  }
-
-  // Find the best calibration point for distortion (closest focal length,
-  // then closest aperture among those)
-  let dist_point = interpolate_point(&profile.calibration, focal_mm, aperture);
-
-  // Convert Adobe coefficients to DNG WarpRectilinear coordinate space.
-  //
-  // Adobe normalizes r by (width * FocalLengthX).
-  // DNG WarpRectilinear normalizes r by MaxDistancePointToRect(center, imageRect):
-  //   maxDist = sqrt(max(cx, 1-cx)² * W² + max(cy, 1-cy)² * H²)
-  // which equals the half-diagonal only when center is at (0.5, 0.5).
-  // (see DNG SDK dng_lens_correction.h, MaxDistancePointToRect)
-  //
-  // At the same physical pixel: r_dng = r_adobe * ratio, where
-  //   ratio = (width * flx) / maxDist
-  // Equating the two polynomials term-by-term:
-  //   k_dng · r_dng^N = k_adobe · r_adobe^N
-  //                   = k_adobe · (r_dng / ratio)^N
-  // ⇒ k_dng = k_adobe / ratio^N
-  let w = dng_width as f64;
-  let h = dng_height as f64;
-  let cx_px = dist_point.cx * w;
-  let cy_px = dist_point.cy * h;
-  let dcx = cx_px.max(w - cx_px);
-  let dcy = cy_px.max(h - cy_px);
-  let max_dist = (dcx * dcx + dcy * dcy).sqrt();
-  let ratio = (w * dist_point.flx) / max_dist;
-
-  let kr1 = dist_point.k1 / (ratio * ratio);
-  let kr2 = dist_point.k2 / ratio.powi(4);
-  let kr3 = dist_point.k3 / ratio.powi(6);
+  // Single canonical Adobe→DNG conversion (interpolation + coordinate-space
+  // change). The byte encoding below derives entirely from these coefficients.
+  let cal = calibration_coeffs(
+    &profile.calibration,
+    Some(focal_mm),
+    Some(aperture),
+    dng_width,
+    dng_height,
+  )?;
 
   log::debug!(
-    "LCP WarpRectilinear for '{}' @ {:.0}mm f/{:.1}: k1={:.6} k2={:.6} k3={:.6} (ratio={:.4})",
-    profile.lens_name, focal_mm, aperture, kr1, kr2, kr3, ratio
+    "LCP WarpRectilinear for '{}' @ {:.0}mm f/{:.1}: k1={:.6} k2={:.6} k3={:.6}",
+    profile.lens_name, focal_mm, aperture, cal.distortion.k[1], cal.distortion.k[2], cal.distortion.k[3]
   );
 
-  let kr = [[1.0_f64, kr1, kr2, kr3]];
-  let kt = [[0.0_f64, 0.0_f64]];
-  let warp_opcode = opcodes::encode_warp_rectilinear(&kr, &kt, dist_point.cx, dist_point.cy, opcodes::FLAG_OPTIONAL);
+  let kr = [cal.distortion.k];
+  let kt = [cal.distortion.kt];
+  let warp_opcode = opcodes::encode_warp_rectilinear(&kr, &kt, cal.distortion.cx, cal.distortion.cy, opcodes::FLAG_OPTIONAL);
   let mut list3_opcodes: Vec<Vec<u8>> = vec![warp_opcode];
 
   // Chromatic aberration: Adobe stores a radial ScaleFactor per channel
   // relative to green. DNG readers can express this as a per-plane
   // WarpRectilinear (3 planes: R, G, B) applied after the distortion opcode.
   // Only emit when the scales actually differ from identity — tiny amounts
-  // of CA correction aren't worth the extra sampling pass.
-  let sr = dist_point.ca_red_scale.unwrap_or(1.0);
-  let sb = dist_point.ca_blue_scale.unwrap_or(1.0);
-  if (sr - 1.0).abs() > 1e-6 || (sb - 1.0).abs() > 1e-6 {
-    let ca_kr = [
-      [sr, 0.0, 0.0, 0.0],
-      [1.0, 0.0, 0.0, 0.0],
-      [sb, 0.0, 0.0, 0.0],
-    ];
-    let ca_kt = [[0.0_f64, 0.0_f64]; 3];
-    let ca_opcode = opcodes::encode_warp_rectilinear(&ca_kr, &ca_kt, dist_point.cx, dist_point.cy, opcodes::FLAG_OPTIONAL);
-    list3_opcodes.push(ca_opcode);
-    log::debug!(
-      "LCP CA for '{}' @ {:.0}mm: r_scale={:.6} b_scale={:.6}",
-      profile.lens_name, focal_mm, sr, sb
-    );
+  // of CA correction aren't worth the extra sampling pass. (The coefficient
+  // struct carries `tca` whenever present; the identity threshold lives only
+  // here, on the byte path.)
+  if let Some(tca) = &cal.tca {
+    let sr = tca.kr;
+    let sb = tca.kb;
+    if (sr - 1.0).abs() > 1e-6 || (sb - 1.0).abs() > 1e-6 {
+      let ca_kr = [
+        [sr, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [sb, 0.0, 0.0, 0.0],
+      ];
+      let ca_kt = [[0.0_f64, 0.0_f64]; 3];
+      let ca_opcode = opcodes::encode_warp_rectilinear(&ca_kr, &ca_kt, cal.distortion.cx, cal.distortion.cy, opcodes::FLAG_OPTIONAL);
+      list3_opcodes.push(ca_opcode);
+      log::debug!(
+        "LCP CA for '{}' @ {:.0}mm: r_scale={:.6} b_scale={:.6}",
+        profile.lens_name, focal_mm, sr, sb
+      );
+    }
   }
 
   let opcode_list3 = opcodes::encode_opcode_list(&list3_opcodes);
 
   // Vignetting correction
-  let opcode_list1 = if let Some(vig_point) = find_vignette_point(&profile.calibration, focal_mm, aperture) {
-    // Vignette model uses the same coordinate conversion.
-    // FixVignetteRadial normalizes r by MaxDistancePointToRect(center, imageRect).
-    // Adobe's vignette model also uses FocalLengthX normalization.
-    //
-    // Adobe vignette radius: r_adobe = dist_from_center / (width * flx)
-    // DNG vignette radius:   r_dng = dist_from_center / maxDist
-    //   where maxDist = sqrt(max(cx,1-cx)²·W² + max(cy,1-cy)²·H²)
-    //
-    // r_dng = r_adobe * (width * flx) / maxDist
-    // ratio_vig = (width * flx) / maxDist
-    let w = dng_width as f64;
-    let h = dng_height as f64;
-    let vig_flx = vig_point.flx;
-    let vig_cx_px = vig_point.cx * w;
-    let vig_cy_px = vig_point.cy * h;
-    let vig_dcx = vig_cx_px.max(w - vig_cx_px);
-    let vig_dcy = vig_cy_px.max(h - vig_cy_px);
-    let vig_max_dist = (vig_dcx * vig_dcx + vig_dcy * vig_dcy).sqrt();
-    let vig_ratio = (w * vig_flx) / vig_max_dist;
-
-    // Same Adobe→DNG conversion as distortion: divide by ratio^(2N).
-    let vk0 = vig_point.v1.unwrap_or(0.0) / vig_ratio.powi(2);
-    let vk1 = vig_point.v2.unwrap_or(0.0) / vig_ratio.powi(4);
-    let vk2 = vig_point.v3.unwrap_or(0.0) / vig_ratio.powi(6);
-
+  let opcode_list1 = if let Some(vig) = &cal.vignetting {
     log::debug!(
       "LCP FixVignetteRadial for '{}' @ {:.0}mm f/{:.1}: k0={:.6} k1={:.6} k2={:.6}",
-      profile.lens_name, focal_mm, aperture, vk0, vk1, vk2
+      profile.lens_name, focal_mm, aperture, vig.k[0], vig.k[1], vig.k[2]
     );
-
-    let vig_opcode = opcodes::encode_fix_vignette_radial(vk0, vk1, vk2, 0.0, 0.0, vig_point.cx, vig_point.cy, opcodes::FLAG_OPTIONAL);
+    let vig_opcode = opcodes::encode_fix_vignette_radial(vig.k[0], vig.k[1], vig.k[2], vig.k[3], vig.k[4], vig.cx, vig.cy, opcodes::FLAG_OPTIONAL);
     opcodes::encode_opcode_list(&[vig_opcode])
   } else {
     Vec::new()
@@ -214,7 +324,15 @@ fn generate_opcodes(
 
 /// Find the best calibration point by interpolating between the two closest
 /// focal lengths, then picking the closest aperture.
-fn interpolate_point(points: &[CalibrationPoint], focal: f64, aperture: f64) -> CalibrationPoint {
+///
+/// `focal == None` returns the first calibration point verbatim (the EXIF-less
+/// case); `aperture == None` takes the first point at the chosen focal length.
+fn interpolate_point(points: &[CalibrationPoint], focal: Option<f64>, aperture: Option<f64>) -> CalibrationPoint {
+  let focal = match focal {
+    None => return points[0].clone(),
+    Some(f) => f,
+  };
+
   // Get unique focal lengths
   let mut focals: Vec<f64> = points.iter().map(|p| p.focal).collect();
   focals.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -241,7 +359,7 @@ fn interpolate_point(points: &[CalibrationPoint], focal: f64, aperture: f64) -> 
 
   CalibrationPoint {
     focal,
-    aperture,
+    aperture: aperture.unwrap_or(p_lo.aperture),
     flx: lerp(p_lo.flx, p_hi.flx, t),
     cx: lerp(p_lo.cx, p_hi.cx, t),
     cy: lerp(p_lo.cy, p_hi.cy, t),
@@ -255,11 +373,15 @@ fn interpolate_point(points: &[CalibrationPoint], focal: f64, aperture: f64) -> 
     ca_blue_scale: lerp_opt(p_lo.ca_blue_scale, p_hi.ca_blue_scale, t),
     residual_error: None,
     focus_distance: None,
+    vig_flx: lerp_opt(p_lo.vig_flx, p_hi.vig_flx, t),
+    vig_cx: lerp_opt(p_lo.vig_cx, p_hi.vig_cx, t),
+    vig_cy: lerp_opt(p_lo.vig_cy, p_hi.vig_cy, t),
   }
 }
 
-/// Find the calibration point with the closest aperture at the closest focal length.
-fn find_closest_aperture(points: &[CalibrationPoint], focal: f64, aperture: f64) -> CalibrationPoint {
+/// Find the calibration point with the closest aperture at the closest focal
+/// length. `aperture == None` takes the first point at that focal length.
+fn find_closest_aperture(points: &[CalibrationPoint], focal: f64, aperture: Option<f64>) -> CalibrationPoint {
   // Filter to points at this focal length (or closest)
   let at_focal: Vec<&CalibrationPoint> = points.iter().filter(|p| (p.focal - focal).abs() < 0.5).collect();
   if at_focal.is_empty() {
@@ -274,59 +396,55 @@ fn find_closest_aperture(points: &[CalibrationPoint], focal: f64, aperture: f64)
       .cloned()
       .unwrap();
   }
-  // Find closest aperture
-  at_focal
-    .iter()
-    .min_by(|a, b| {
-      let da = (a.aperture - aperture).abs();
-      let db = (b.aperture - aperture).abs();
-      da.partial_cmp(&db).unwrap()
-    })
-    .cloned()
-    .cloned()
-    .unwrap()
+  match aperture {
+    None => at_focal[0].clone(),
+    // Find closest aperture
+    Some(ap) => at_focal
+      .iter()
+      .min_by(|a, b| {
+        let da = (a.aperture - ap).abs();
+        let db = (b.aperture - ap).abs();
+        da.partial_cmp(&db).unwrap()
+      })
+      .cloned()
+      .cloned()
+      .unwrap(),
+  }
 }
 
 /// Find the best vignetting calibration point (must have v1 present).
-fn find_vignette_point(points: &[CalibrationPoint], focal: f64, aperture: f64) -> Option<CalibrationPoint> {
-  let vig_points: Vec<&CalibrationPoint> = points.iter().filter(|p| p.v1.is_some()).collect();
-  if vig_points.is_empty() {
+///
+/// `focal == None` returns the first vignetting point verbatim.
+fn find_vignette_point(points: &[CalibrationPoint], focal: Option<f64>, aperture: Option<f64>) -> Option<CalibrationPoint> {
+  let vig: Vec<CalibrationPoint> = points.iter().filter(|p| p.v1.is_some()).cloned().collect();
+  if vig.is_empty() {
     return None;
   }
 
+  let focal = match focal {
+    None => return Some(vig[0].clone()),
+    Some(f) => f,
+  };
+
   // Get unique focal lengths with vignetting
-  let mut focals: Vec<f64> = vig_points.iter().map(|p| p.focal).collect();
+  let mut focals: Vec<f64> = vig.iter().map(|p| p.focal).collect();
   focals.sort_by(|a, b| a.partial_cmp(b).unwrap());
   focals.dedup();
 
   let (f_lo, f_hi) = bracket(&focals, focal);
 
   if (f_lo - f_hi).abs() < 0.01 {
-    let at_focal: Vec<&&CalibrationPoint> = vig_points.iter().filter(|p| (p.focal - f_lo).abs() < 0.5).collect();
-    return at_focal
-      .iter()
-      .min_by(|a, b| {
-        let da = (a.aperture - aperture).abs();
-        let db = (b.aperture - aperture).abs();
-        da.partial_cmp(&db).unwrap()
-      })
-      .map(|p| (**p).clone());
+    return Some(find_closest_aperture(&vig, f_lo, aperture));
   }
 
   // Interpolate between focal lengths
-  let p_lo = vig_points
-    .iter()
-    .filter(|p| (p.focal - f_lo).abs() < 0.5)
-    .min_by(|a, b| (a.aperture - aperture).abs().partial_cmp(&(b.aperture - aperture).abs()).unwrap())?;
-  let p_hi = vig_points
-    .iter()
-    .filter(|p| (p.focal - f_hi).abs() < 0.5)
-    .min_by(|a, b| (a.aperture - aperture).abs().partial_cmp(&(b.aperture - aperture).abs()).unwrap())?;
+  let p_lo = find_closest_aperture(&vig, f_lo, aperture);
+  let p_hi = find_closest_aperture(&vig, f_hi, aperture);
 
   let t = (focal - f_lo) / (f_hi - f_lo);
   Some(CalibrationPoint {
     focal,
-    aperture,
+    aperture: aperture.unwrap_or(p_lo.aperture),
     flx: lerp(p_lo.flx, p_hi.flx, t),
     cx: lerp(p_lo.cx, p_hi.cx, t),
     cy: lerp(p_lo.cy, p_hi.cy, t),
@@ -340,6 +458,9 @@ fn find_vignette_point(points: &[CalibrationPoint], focal: f64, aperture: f64) -
     ca_blue_scale: lerp_opt(p_lo.ca_blue_scale, p_hi.ca_blue_scale, t),
     residual_error: None,
     focus_distance: None,
+    vig_flx: lerp_opt(p_lo.vig_flx, p_hi.vig_flx, t),
+    vig_cx: lerp_opt(p_lo.vig_cx, p_hi.vig_cx, t),
+    vig_cy: lerp_opt(p_lo.vig_cy, p_hi.vig_cy, t),
   })
 }
 
@@ -419,6 +540,9 @@ fn parse_profile_manual(v: &toml::Value) -> Option<LensProfile> {
       ca_blue_scale: c.get("ca_blue_scale").and_then(|v| v.as_float()),
       residual_error: c.get("residual_error").and_then(|v| v.as_float()),
       focus_distance: c.get("focus_distance").and_then(|v| v.as_float()),
+      vig_flx: c.get("vig_flx").and_then(|v| v.as_float()),
+      vig_cx: c.get("vig_cx").and_then(|v| v.as_float()),
+      vig_cy: c.get("vig_cy").and_then(|v| v.as_float()),
     });
   }
 
@@ -430,4 +554,161 @@ fn parse_profile_manual(v: &toml::Value) -> Option<LensProfile> {
     image_height,
     calibration,
   })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Build a distortion-only calibration point (all optional fields cleared).
+  fn pt(focal: f64, aperture: f64, flx: f64, cx: f64, cy: f64, k1: f64, k2: f64, k3: f64) -> CalibrationPoint {
+    CalibrationPoint {
+      focal,
+      aperture,
+      flx,
+      cx,
+      cy,
+      k1,
+      k2,
+      k3,
+      v1: None,
+      v2: None,
+      v3: None,
+      ca_red_scale: None,
+      ca_blue_scale: None,
+      residual_error: None,
+      focus_distance: None,
+      vig_flx: None,
+      vig_cx: None,
+      vig_cy: None,
+    }
+  }
+
+  /// Parity tolerance vs the reference Python implementation. The two sides
+  /// compute the same closed form on bit-identical inputs; only the `x**n`
+  /// (C `pow`) vs `x.powi(n)` rounding differs, far below this bound.
+  fn approx(got: f64, expected: f64) {
+    assert!(
+      (got - expected).abs() < 1e-9,
+      "expected {expected}, got {got} (diff {})",
+      (got - expected).abs()
+    );
+  }
+
+  // Golden values below were produced by the original Python lcp_db math
+  // (backend/utils/lcp_db.py) on the same inputs, captured before deleting it.
+
+  #[test]
+  fn sample1_distortion_only() {
+    let pts = vec![pt(50.0, 2.8, 1.0, 0.5, 0.5, 0.1, -0.05, 0.02)];
+    let cal = calibration_coeffs(&pts, Some(50.0), Some(2.8), 6000, 4000).unwrap();
+    approx(cal.distortion.k[0], 1.0);
+    approx(cal.distortion.k[1], 0.03611111111111112);
+    approx(cal.distortion.k[2], -0.0065200617283950645);
+    approx(cal.distortion.k[3], 0.0009417866941015095);
+    assert_eq!(cal.distortion.kt, [0.0, 0.0]);
+    approx(cal.distortion.cx, 0.5);
+    approx(cal.distortion.cy, 0.5);
+    assert!(cal.tca.is_none());
+    assert!(cal.vignetting.is_none());
+  }
+
+  #[test]
+  fn sample2_distortion_tca_vignette() {
+    let mut p = pt(24.0, 4.0, 1.2, 0.5, 0.5, -0.2, 0.1, -0.03);
+    p.v1 = Some(-1.5);
+    p.v2 = Some(0.8);
+    p.v3 = Some(-0.2);
+    p.ca_red_scale = Some(1.0002);
+    p.ca_blue_scale = Some(0.9995);
+    let pts = vec![p];
+    let cal = calibration_coeffs(&pts, Some(24.0), Some(4.0), 4000, 3000).unwrap();
+    approx(cal.distortion.k[1], -0.054253472222222224);
+    approx(cal.distortion.k[2], 0.007358598120418597);
+    approx(cal.distortion.k[3], -0.0005988442480809405);
+    let tca = cal.tca.unwrap();
+    approx(tca.kr, 1.0002);
+    approx(tca.kb, 0.9995);
+    let vig = cal.vignetting.unwrap();
+    approx(vig.k[0], -0.4069010416666667);
+    approx(vig.k[1], 0.058868784963348776);
+    approx(vig.k[2], -0.00399229498720627);
+    approx(vig.k[3], 0.0);
+    approx(vig.k[4], 0.0);
+    approx(vig.cx, 0.5);
+    approx(vig.cy, 0.5);
+  }
+
+  #[test]
+  fn sample3_canon_real_point() {
+    // Canon EF 100-400mm f/4.5-5.6L IS II USM, focal=100 aperture=5.6, 5640x3752.
+    let mut p = pt(100.0, 5.6, 2.987735, 0.5, 0.5, -0.291151, -1.1918, 1.114907);
+    p.v1 = Some(-2.182246);
+    p.v2 = Some(-101.904841);
+    p.v3 = Some(1062.806708);
+    let pts = vec![p];
+    let cal = calibration_coeffs(&pts, Some(100.0), Some(5.6), 5640, 3752).unwrap();
+    approx(cal.distortion.k[1], -0.011762688252819233);
+    approx(cal.distortion.k[2], -0.0019452704203300967);
+    approx(cal.distortion.k[3], 7.351966932995161e-05);
+    assert!(cal.tca.is_none());
+    let vig = cal.vignetting.unwrap();
+    approx(vig.k[0], -0.088164146401564);
+    approx(vig.k[1], -0.16633031791050654);
+    approx(vig.k[2], 0.07008404982102942);
+  }
+
+  #[test]
+  fn none_focal_uses_first_point() {
+    // focal=None / aperture=None must use the first point verbatim.
+    let mut p = pt(24.0, 4.0, 1.2, 0.5, 0.5, -0.2, 0.1, -0.03);
+    p.v1 = Some(-1.5);
+    p.v2 = Some(0.8);
+    p.v3 = Some(-0.2);
+    p.ca_red_scale = Some(1.0002);
+    p.ca_blue_scale = Some(0.9995);
+    let pts = vec![p];
+    let cal = calibration_coeffs(&pts, None, None, 6000, 4000).unwrap();
+    approx(cal.distortion.k[1], -0.05015432098765433);
+    approx(cal.distortion.k[2], 0.006288639784331658);
+    approx(cal.distortion.k[3], -0.00047310368747865484);
+    let vig = cal.vignetting.unwrap();
+    approx(vig.k[0], -0.37615740740740744);
+  }
+
+  #[test]
+  fn guard_cases_return_none() {
+    let pts = vec![pt(50.0, 2.8, 1.0, 0.5, 0.5, 0.1, -0.05, 0.02)];
+    assert!(calibration_coeffs(&pts, Some(50.0), Some(2.8), 0, 4000).is_none());
+    assert!(calibration_coeffs(&pts, Some(50.0), Some(2.8), 6000, 0).is_none());
+    assert!(calibration_coeffs(&[], Some(50.0), Some(2.8), 6000, 4000).is_none());
+  }
+
+  #[test]
+  fn tca_emitted_at_identity_scale() {
+    // Python emits tca whenever a CA scale is present, even at exactly 1.0.
+    let mut p = pt(50.0, 2.8, 1.0, 0.5, 0.5, 0.1, -0.05, 0.02);
+    p.ca_red_scale = Some(1.0);
+    let pts = vec![p];
+    let cal = calibration_coeffs(&pts, Some(50.0), Some(2.8), 6000, 4000).unwrap();
+    let tca = cal.tca.expect("tca present even at identity red scale");
+    approx(tca.kr, 1.0);
+    approx(tca.kb, 1.0);
+  }
+
+  #[test]
+  fn serialized_dict_shape() {
+    // The JSON the binding hands to Python must use exactly these keys, omitting
+    // absent optional sub-dicts.
+    let pts = vec![pt(50.0, 2.8, 1.0, 0.5, 0.5, 0.1, -0.05, 0.02)];
+    let cal = calibration_coeffs(&pts, Some(50.0), Some(2.8), 6000, 4000).unwrap();
+    let json = serde_json::to_value(&cal).unwrap();
+    assert!(json.get("distortion").is_some());
+    assert!(json["distortion"].get("k").is_some());
+    assert!(json["distortion"].get("kt").is_some());
+    assert!(json["distortion"].get("cx").is_some());
+    assert!(json["distortion"].get("cy").is_some());
+    assert!(json.get("tca").is_none(), "tca key omitted when absent");
+    assert!(json.get("vignetting").is_none(), "vignetting key omitted when absent");
+  }
 }
