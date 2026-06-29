@@ -500,6 +500,49 @@ fn embed_exif(
     Ok(PyBytes::new(py, &result).into())
 }
 
+/// Fit the in-body look as per-channel display `colorCurves`.
+///
+/// Fits 3 monotone per-channel display-space curves mapping a NEUTRAL render to
+/// the camera's embedded-JPEG preview — the in-body look (tone + colour + WB +
+/// global Active-D-Lighting), the `lb:recipe.colorCurves` payload the editor's
+/// `applyRecipe` seeds.
+///
+/// IMPORTANT: `neutral` must be the editor's *actual* neutral render
+/// (rust-renderer at EditValues=0, DCP/BaselineExposure applied), NOT a bare
+/// `RawDevelop` develop — fitting against the wrong neutral produces curves that
+/// don't reproduce in the editor, and `RawDevelop` is degenerate (black) on dark
+/// scenes. See `docs/learned-look-fit.md` and `ml/look-fit/`.
+///
+/// Parameters
+/// ----------
+/// neutral : bytes
+///     Encoded image bytes (JPEG) of the editor's neutral render.
+/// preview : bytes
+///     Encoded image bytes (JPEG) of the camera's embedded preview.
+///
+/// Returns
+/// -------
+/// str or None
+///     JSON array of 3 `ToneCurve` objects (`[{"type","points":[x0,y0,…]}, …]`),
+///     or `None` when the regression guard fires (no global look to recover —
+///     the editor should open at neutral).
+#[pyfunction]
+fn fit_look_curves(py: Python<'_>, neutral: &[u8], preview: &[u8]) -> PyResult<Option<String>> {
+    let neutral = neutral.to_vec();
+    let preview = preview.to_vec();
+    let result = py
+        .detach(move || -> Result<Option<String>, String> {
+            let n = image::load_from_memory(&neutral).map_err(|e| e.to_string())?;
+            let p = image::load_from_memory(&preview).map_err(|e| e.to_string())?;
+            match rawler::dng::convert::fit_color_curves(&n, &p) {
+                Some(curves) => Ok(Some(serde_json::to_string(&curves).map_err(|e| e.to_string())?)),
+                None => Ok(None),
+            }
+        })
+        .map_err(PyRuntimeError::new_err)?;
+    Ok(result)
+}
+
 #[pymodule]
 fn dnglab_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(convert_to_dng, m)?)?;
@@ -508,6 +551,7 @@ fn dnglab_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(supported_extensions, m)?)?;
     m.add_function(wrap_pyfunction!(raw_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(extract_preview, m)?)?;
+    m.add_function(wrap_pyfunction!(fit_look_curves, m)?)?;
     m.add_function(wrap_pyfunction!(embed_exif, m)?)?;
     m.add_function(wrap_pyfunction!(lcp_dng_calibration, m)?)?;
     Ok(())
