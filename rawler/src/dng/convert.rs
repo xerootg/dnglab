@@ -527,12 +527,12 @@ where
 /// to a common grid, pair pixels, quantile-bin by the neutral value, take the
 /// mean preview value per bin, enforce monotonicity, anchor the endpoints toward
 /// identity so out-of-sample highlights don't clip.
-fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<[crate::recipe::ToneCurve; 3]> {
+pub fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<[crate::recipe::ToneCurve; 3]> {
   use crate::recipe::{CurveType, ToneCurve};
   // Common low-res grid: cheap, robust, and statistically ample (~44k samples).
   const FW: u32 = 256;
   const FH: u32 = 171;
-  const NB: usize = 24; // quantile bins per channel
+  const NB: usize = 64; // quantile bins per channel (was 24; finer = closer fit)
   let n = neutral.resize_exact(FW, FH, image::imageops::FilterType::Triangle).to_rgb8();
   let p = preview.resize_exact(FW, FH, image::imageops::FilterType::Triangle).to_rgb8();
   let np = n.as_raw();
@@ -597,7 +597,9 @@ fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<[c
     // is ring-free and what we validated against) onto NK uniform x in [0,1].
     // Below the first / above the last observed tone we extrapolate toward
     // identity so out-of-sample shadows/highlights stay sane on other scenes.
-    const NK: usize = 16;
+    const NK: usize = 32; // uniform knots (was 16); validated through the editor's
+                          // natural-cubic spline to gain ~0.15-0.4 MAE with no ringing
+                          // (uniform spacing + monotonicity), see ml/look-fit.
     let (xf, yf) = ctrl[0];
     let (xl, yl) = *ctrl.last().unwrap();
     let interp = |x: f32| -> f32 {
@@ -637,6 +639,36 @@ fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Option<[c
   let curves = [fit_channel(0), fit_channel(1), fit_channel(2)];
   if curves.iter().all(|t| t.is_empty()) {
     return None;
+  }
+
+  // Regression guard: keep the curves only if they actually improve the match.
+  // When the neutral already matches the JPEG (flat picture control) or the
+  // difference is spatially-varying/local (not a per-channel function), the
+  // fitted curve is near-identity and can slightly HURT — open at neutral
+  // instead. Evaluate the uniform-knot curve by linear interpolation on the grid
+  // (the editor splines it; linear is close enough for the keep/drop decision).
+  let eval = |pts: &[f32], x: f32| -> f32 {
+    let nk = pts.len() / 2;
+    if nk < 2 {
+      return x;
+    }
+    let t = x.clamp(0.0, 1.0) * (nk - 1) as f32;
+    let i = (t.floor() as usize).min(nk - 2);
+    let f = t - i as f32;
+    pts[2 * i + 1] * (1.0 - f) + pts[2 * (i + 1) + 1] * f
+  };
+  let (mut fit_err, mut id_err) = (0.0f64, 0.0f64);
+  for i in 0..px {
+    for c in 0..3 {
+      let b = np[i * 3 + c] as f32 / 255.0;
+      let q = pp[i * 3 + c] as f32 / 255.0;
+      let f = if curves[c].is_empty() { b } else { eval(&curves[c].points, b) };
+      fit_err += (f - q).abs() as f64;
+      id_err += (b - q).abs() as f64;
+    }
+  }
+  if fit_err >= id_err {
+    return None; // no global look to recover; the editor opens at neutral
   }
   Some(curves)
 }
