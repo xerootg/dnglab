@@ -1381,6 +1381,15 @@ fn build_fix_vignette_opcode(blob: &[u8], read_rational: fn(&[u8], usize) -> Opt
 
   log::debug!("NEF FixVignetteRadial: k0={:.5} k1={:.5} k2={:.5} k3={:.5}", k0, k1, k2, k3);
 
+  // Skip a malformed correction whose gain dips non-positive (would black out the
+  // corners — the renderer clamps negative gain to 0). Some Nikon VignetteInfo
+  // blobs (e.g. the Tamron 35-150 on the Z f) carry coefficients that don't map
+  // to a valid 1+k·r² brightening polynomial; rendering uncorrected is correct.
+  if !opcodes::vignette_gain_valid(&[k0, k1, k2, k3, 0.0]) {
+    log::warn!("NEF FixVignetteRadial gain dips non-positive (k0={k0:.4} k1={k1:.4} k2={k2:.4} k3={k3:.4}); skipping vignette correction");
+    return None;
+  }
+
   let opcode = opcodes::encode_fix_vignette_radial(k0, k1, k2, k3, 0.0, 0.5, 0.5, opcodes::FLAG_OPTIONAL);
   Some(opcodes::encode_opcode_list(&[opcode]))
 }

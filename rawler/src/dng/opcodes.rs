@@ -42,6 +42,25 @@ fn opcode_header(opcode_id: u32, flags: u32, params: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// True if a `FixVignetteRadial` gain `g(r) = 1 + Σ kᵢ·r^(2(i+1))` stays positive
+/// across the image radius `r ∈ [0, 1]` (`r = 1` = farthest corner). A valid
+/// brightening correction is ≥ 1 everywhere; coefficients (from a camera
+/// MakerNote or an LCP fit) that make the polynomial dip toward/below zero black
+/// out the corners — a faithful renderer clamps negative gain to 0. Callers skip
+/// the opcode when this is false (render uncorrected rather than render black).
+pub fn vignette_gain_valid(k: &[f64; 5]) -> bool {
+    let mut r = 0.0_f64;
+    while r <= 1.0001 {
+        let r2 = r * r;
+        let g = 1.0 + k[0] * r2 + k[1] * r2.powi(2) + k[2] * r2.powi(3) + k[3] * r2.powi(4) + k[4] * r2.powi(5);
+        if g < 0.5 {
+            return false;
+        }
+        r += 0.05;
+    }
+    true
+}
+
 /// Encode a **FixVignetteRadial** opcode (ID=3, DNG 1.3).
 ///
 /// The opcode multiplies each pixel by:
@@ -55,6 +74,7 @@ fn opcode_header(opcode_id: u32, flags: u32, params: &[u8]) -> Vec<u8> {
 /// `cx` / `cy`: normalised centre coordinates (0.5 = image centre).
 pub fn encode_fix_vignette_radial(k0: f64, k1: f64, k2: f64, k3: f64, k4: f64, cx: f64, cy: f64, flags: u32) -> Vec<u8> {
     let mut params = Vec::with_capacity(56);
+    // (validity is the caller's responsibility — see `vignette_gain_valid`)
     write_f64_be(&mut params, k0);
     write_f64_be(&mut params, k1);
     write_f64_be(&mut params, k2);

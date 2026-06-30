@@ -208,17 +208,25 @@ pub fn calibration_coeffs(
       let vig_cy = vig.vig_cy.unwrap_or(vig.cy);
       let vig_flx = vig.vig_flx.unwrap_or(vig.flx);
       let vr = dng_ratio(vig_cx, vig_cy, vig_flx, w, h);
-      Some(DngVignette {
-        k: [
-          vig.v1.unwrap_or(0.0) / vr.powi(2),
-          vig.v2.unwrap_or(0.0) / vr.powi(4),
-          vig.v3.unwrap_or(0.0) / vr.powi(6),
-          0.0,
-          0.0,
-        ],
-        cx: vig_cx,
-        cy: vig_cy,
-      })
+      let k = [
+        vig.v1.unwrap_or(0.0) / vr.powi(2),
+        vig.v2.unwrap_or(0.0) / vr.powi(4),
+        vig.v3.unwrap_or(0.0) / vr.powi(6),
+        0.0,
+        0.0,
+      ];
+      // A FixVignetteRadial *correction* gain g(r) = 1 + Σ k·r^(2i) brightens the
+      // vignetted corners, so it must stay positive (≥ ~1) across the image
+      // radius. Bad/extreme LCP params (or interpolation between calibration
+      // points) can yield a polynomial that dips negative — a faithful renderer
+      // clamps that to 0, blacking out everything past the central circle. Don't
+      // ship such a correction: skip it (render uncorrected) rather than black.
+      if opcodes::vignette_gain_valid(&k) {
+        Some(DngVignette { k, cx: vig_cx, cy: vig_cy })
+      } else {
+        log::warn!("LCP FixVignetteRadial gain dips non-positive (k={k:?}); skipping vignette correction");
+        None
+      }
     }
     _ => None,
   };
