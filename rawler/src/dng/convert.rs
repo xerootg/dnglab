@@ -667,8 +667,19 @@ pub fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Optio
       id_err += (b - q).abs() as f64;
     }
   }
-  if fit_err >= id_err {
-    return None; // no global look to recover; the editor opens at neutral
+  // Sanity gates (mean absolute error in [0,1], display domain):
+  //  - fit_err >= id_err     : the curve can't beat identity (no global look).
+  //  - id_err  > 0.30        : neutral and preview are grossly mismatched — the
+  //                            fit's inputs don't correspond (e.g. a broken/dark
+  //                            neutral render, or wrong orientation/crop). A real
+  //                            in-body tone gap is < ~0.15; 0.30 only triggers on
+  //                            mismatched inputs. Fitting these yields garbage
+  //                            curves (e.g. black -> 0.83) that wash the image out.
+  //  - fit_err > 0.22        : the fitted match is still poor — don't seed it.
+  // Any of these -> return None so the editor opens at neutral instead.
+  let n = (px * 3) as f64;
+  if fit_err >= id_err || id_err / n > 0.30 || fit_err / n > 0.22 {
+    return None;
   }
   Some(curves)
 }
