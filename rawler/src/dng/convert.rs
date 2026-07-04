@@ -533,6 +533,12 @@ pub fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Optio
   const FW: u32 = 256;
   const FH: u32 = 171;
   const NB: usize = 64; // quantile bins per channel (was 24; finer = closer fit)
+  // Display-sRGB threshold (~5/255) below which a neutral tone is "crushed":
+  // the develop has clipped that region to ~0 and lost all tonal gradation, so
+  // its per-pixel mapping to the preview is no longer reliable. Bins whose mean
+  // neutral value falls under this are remapped to the preview's shadow floor —
+  // see the crushed-black guard in `fit_channel`.
+  const BLACK_EPS: f32 = 0.02;
   let n = neutral.resize_exact(FW, FH, image::imageops::FilterType::Triangle).to_rgb8();
   let p = preview.resize_exact(FW, FH, image::imageops::FilterType::Triangle).to_rgb8();
   let np = n.as_raw();
@@ -557,6 +563,19 @@ pub fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Optio
     if per == 0 {
       return ToneCurve { curve_type: CurveType::Empty, points: vec![] };
     }
+    // Preview SHADOW FLOOR for this channel: the darkest tone the camera
+    // actually renders, estimated as a robust low percentile (2nd) of the WHOLE
+    // preview channel. This is a *global* statistic — deliberately independent of
+    // which preview pixels happen to fall in a given neutral bin — so it does not
+    // track the per-bin scatter that inflates a crushed bin's mean/p10 (see the
+    // crushed-black guard below). For well-exposed frames it is ~0; for frames
+    // with a genuine lifted toe it is the true floor (e.g. ~0.05-0.10).
+    let floor_y = {
+      let mut qs: Vec<f32> = pairs.iter().map(|pr| pr.1).collect();
+      qs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+      let idx = ((qs.len() as f32 * 0.02) as usize).min(qs.len().saturating_sub(1));
+      qs[idx]
+    };
     let mut last_y = 0.0f32;
     for bin in 0..NB {
       let lo = bin * per;
@@ -570,6 +589,28 @@ pub fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Optio
       }
       let cx = sx / cnt;
       let mut cy = sy / cnt;
+      // Crushed-black guard. When the neutral tone is at/near black
+      // (`cx < BLACK_EPS`) the develop has clipped that region to ~0 and lost all
+      // tonal gradation, so this bin's pixels pair with a *scattered* slice of the
+      // preview — true shadows AND lifted/noisy mid-shadows that also crushed to
+      // 0. Their MEAN (and even a per-bin low percentile) is dragged up by that
+      // bright tail and, once the cummax below propagates it forward and the
+      // dark-end extrapolation carries it to x=0, pins the black point to a lifted
+      // value: the ~0.22 black-lift washout the editor then over-applies. The
+      // per-bin spread is exactly the scatter, so a per-bin statistic cannot
+      // recover the floor; map crushed black to the *global* preview shadow floor
+      // (`floor_y`) instead. That is scatter-independent, so it lands the toe at
+      // the camera's true darkest tone regardless of how badly the bin scattered.
+      // No-op for well-exposed frames (their darkest bin sits above BLACK_EPS) and
+      // for genuinely-black crushed frames (floor_y ≈ bin mean ≈ 0). Complementary
+      // to the `id_err > 0.30` regression guard below: that one *drops* grossly
+      // mismatched neutral/preview pairs (e.g. a vignette-black develop vs a
+      // corrected JPEG), while this one keeps faithful-but-crushed fits from
+      // over-lifting. It can only lower the toe, never raise it, so it never
+      // introduces a washout.
+      if cx < BLACK_EPS {
+        cy = floor_y;
+      }
       // Monotone (cummax) so the curve never inverts.
       if cy < last_y {
         cy = last_y;
@@ -786,6 +827,97 @@ fn generate_preview(rawfile: &RawSource, decoder: &dyn Decoder, rawimage: &RawIm
       };
        */
       Ok(image.to_dynamic_image().unwrap())
+    }
+  }
+}
+
+#[cfg(test)]
+mod fit_color_curves_tests {
+  use super::fit_color_curves;
+  use image::{DynamicImage, RgbImage};
+
+  // Build a (neutral, preview) pair from a per-row generator. `genf(t)` receives the
+  // normalized row position in [0,1] and returns ((nr,ng,nb),(pr,pg,pb)) in [0,1].
+  // Sized at the fit's own 256x171 grid so resize_exact is ~identity.
+  fn pair(genf: impl Fn(f32) -> ((f32, f32, f32), (f32, f32, f32))) -> (DynamicImage, DynamicImage) {
+    const W: u32 = 256;
+    const H: u32 = 171;
+    let mut neu = RgbImage::new(W, H);
+    let mut prev = RgbImage::new(W, H);
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    for y in 0..H {
+      let t = y as f32 / (H - 1) as f32;
+      let ((nr, ng, nb), (pr, pg, pb)) = genf(t);
+      for x in 0..W {
+        neu.put_pixel(x, y, image::Rgb([q(nr), q(ng), q(nb)]));
+        prev.put_pixel(x, y, image::Rgb([q(pr), q(pg), q(pb)]));
+      }
+    }
+    (DynamicImage::ImageRgb8(neu), DynamicImage::ImageRgb8(prev))
+  }
+
+  fn y0(points: &[f32]) -> f32 {
+    // The curve is stored as uniform knots starting at x=0, so points[1] is y(0).
+    points.get(1).copied().unwrap_or(0.0)
+  }
+
+  /// Regression pin for the washed-out look-fit seed. A "crushed-black" neutral
+  /// (a deep-shadow region clipped to ~0 by the develop) paired with a preview
+  /// whose matching pixels were lifted/scattered by the in-body tone curve makes
+  /// the darkest quantile bin's MEAN preview value inflate; the dark-end
+  /// extrapolation then carries that inflation to x=0 and the editor over-applies
+  /// it as a ~0.22 black lift. Before the global-floor crushed-black guard this
+  /// curve was KEPT by the regression guard (it beats identity) with y(0) ~ 0.26
+  /// -> washed out. The guard must now floor the toe to the preview's true shadow
+  /// floor (~0.05) while STILL keeping the curve.
+  #[test]
+  fn floors_crushed_black_kept_washout() {
+    let (neutral, preview) = pair(|t| {
+      if t < 0.40 {
+        // crushed mid-shadow: neutral=0, preview lifted/scattered ~0.15..0.35
+        ((0.0, 0.0, 0.0), (0.15 + 0.20 * t, 0.15 + 0.20 * t, 0.15 + 0.20 * t))
+      } else if t < 0.50 {
+        // genuine deep shadow: neutral=0, preview ~0.05..0.08 -> sets the floor
+        ((0.0, 0.0, 0.0), (0.05 + 0.03 * t, 0.05 + 0.03 * t, 0.05 + 0.03 * t))
+      } else {
+        // matched midtone/highlight ramp: neutral == preview (well fit)
+        let v = 0.10 + 0.90 * ((t - 0.50) / 0.50);
+        ((v, v, v), (v, v, v))
+      }
+    });
+    let curves = fit_color_curves(&neutral, &preview).expect("crushed-black washout must still be KEPT, not dropped");
+    for (c, name) in ["R", "G", "B"].iter().enumerate() {
+      let lift = y0(&curves[c].points);
+      assert!(
+        lift <= 0.10,
+        "channel {name}: crushed-black toe must be floored, got y(0)={lift:.3} (washout)"
+      );
+    }
+  }
+
+  /// No-op pin: a NON-crushed dark region with a genuine in-body shadow lift
+  /// (the darkest tone is well above BLACK_EPS, so it carries a reliable mapping)
+  /// must be preserved, not flattened. This is the "don't regress already-correct
+  /// photos / faithful warm-shadow looks" guarantee — the guard only touches bins
+  /// crushed below BLACK_EPS.
+  #[test]
+  fn preserves_genuine_noncrushed_toe() {
+    let (neutral, preview) = pair(|t| {
+      if t < 0.30 {
+        // dark but NOT crushed (~0.05..0.07), genuinely lifted in preview (~0.14)
+        ((0.05 + 0.02 * t, 0.05 + 0.02 * t, 0.05 + 0.02 * t), (0.14, 0.14, 0.14))
+      } else {
+        let v = 0.15 + 0.85 * ((t - 0.30) / 0.70);
+        ((v, v, v), (v, v, v))
+      }
+    });
+    let curves = fit_color_curves(&neutral, &preview).expect("a genuine global look must be kept");
+    for (c, name) in ["R", "G", "B"].iter().enumerate() {
+      let lift = y0(&curves[c].points);
+      assert!(
+        lift > 0.04,
+        "channel {name}: genuine non-crushed toe must be preserved, got y(0)={lift:.3} (over-flattened)"
+      );
     }
   }
 }
