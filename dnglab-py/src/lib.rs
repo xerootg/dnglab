@@ -325,7 +325,25 @@ fn extract_preview(
                             image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
                                 .map_err(|e| e.to_string())?
                         }
-                        None => return Ok(None),
+                        // Last resort: a raw-only file with no embedded preview and no
+                        // embedded JPEG — e.g. a DNG exported without a preview (some
+                        // Lightroom exports, and camera-DNGs like the Nikon Z f). Decode
+                        // the CFA and develop it to an sRGB image so the file can still be
+                        // thumbnailed and ingested. Mirrors
+                        // rawler::dng::convert::generate_preview's fallback.
+                        None => {
+                            let rawimage = decoder
+                                .raw_image(&rawfile, &params, false)
+                                .map_err(|e| e.to_string())?;
+                            match rawler::imgop::develop::RawDevelop::default()
+                                .develop_intermediate(&rawimage)
+                                .map_err(|e| e.to_string())?
+                                .to_dynamic_image()
+                            {
+                                Some(dev_img) => dev_img,
+                                None => return Ok(None),
+                            }
+                        }
                     }
                 }
             };
