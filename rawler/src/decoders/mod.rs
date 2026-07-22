@@ -378,6 +378,15 @@ pub trait Decoder: Send {
     None
   }
 
+  /// Whether automatic DCP matching is safe for this file's in-camera style.
+  ///
+  /// Explicit user-selected DCP overrides are always honoured. Decoders should
+  /// return `false` only when the camera metadata identifies a custom look that
+  /// cannot be represented by any fixed vendor DCP.
+  fn auto_dcp_profile_allowed(&self) -> bool {
+    true
+  }
+
   fn format_hint(&self) -> FormatHint;
 }
 

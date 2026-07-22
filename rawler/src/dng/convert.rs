@@ -371,15 +371,22 @@ where
   // Apply DCP color profile — from explicit override file, then --dcp-dir,
   // then auto-discovered from system paths.
   let style_hint = decoder.picture_style_hint();
+  let auto_dcp_allowed = decoder.auto_dcp_profile_allowed();
   let unique_model = format!("{} {}", rawimage.clean_make, rawimage.clean_model);
   let dcp_path = if let Some(explicit) = &params.dcp_file {
     if explicit.exists() {
       Some(explicit.clone())
+    } else if !auto_dcp_allowed {
+      log::warn!("DCP override file not found: {} — automatic DCP matching disabled for this custom camera look", explicit.display());
+      None
     } else {
       log::warn!("DCP override file not found: {} — falling back to auto-match", explicit.display());
       params.dcp_dir.as_ref().and_then(|d| find_dcp(d, &unique_model, style_hint.as_deref()))
         .or_else(|| auto_find_dcp(&unique_model, style_hint.as_deref()))
     }
+  } else if !auto_dcp_allowed {
+    log::debug!("Automatic DCP matching disabled for custom camera look: {}", unique_model);
+    None
   } else if let Some(dcp_dir) = &params.dcp_dir {
     find_dcp(dcp_dir, &unique_model, style_hint.as_deref())
   } else {

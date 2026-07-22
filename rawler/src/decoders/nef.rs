@@ -614,29 +614,15 @@ impl<'a> Decoder for NefDecoder<'a> {
 
   fn picture_style_hint(&self) -> Option<String> {
     let entry = self.makernote.get_entry(NikonMakernote::PictureControlData)?;
-    let data = entry.get_data();
-    // First 4 bytes are the version string ("0100", "0200", "0300", "0301", ...).
-    // PictureControl3 (version "03xx"): Name at bytes 8..28, Base at bytes 28..48.
-    // PictureControl1/2 ("01xx"/"02xx"): Name at bytes 4..24, Base at bytes 24..44.
-    let version = data.get(0..4)?;
-    let (name_range, base_range) = if version.starts_with(b"03") {
-      (8..28usize, 28..48usize)
-    } else {
-      (4..24usize, 24..44usize)
-    };
-    // Prefer "Base" over "Name": Base is the standard preset the custom control
-    // derives from (e.g. "Standard" even when the user tweaked sharpness).
-    let base = null_terminated_ascii(data.get(base_range)?);
-    if !base.is_empty() && base.to_lowercase() != "auto" {
-      return Some(base.to_lowercase());
-    }
-    // Fall back to the Name field.
-    let name = null_terminated_ascii(data.get(name_range)?);
-    if !name.is_empty() && name.to_lowercase() != "auto" {
-      Some(name.to_lowercase())
-    } else {
-      None // "Auto" / empty → let find_dcp fall through to "prefer Standard"
-    }
+    dcp_picture_style_hint(entry.get_data())
+  }
+
+  fn auto_dcp_profile_allowed(&self) -> bool {
+    self
+      .makernote
+      .get_entry(NikonMakernote::PictureControlData)
+      .map(|entry| !is_custom_flexible_color(entry.get_data()))
+      .unwrap_or(true)
   }
 
   fn recipe(&self, _file: &RawSource, _params: &RawDecodeParams) -> Result<Option<crate::recipe::Recipe>> {
@@ -1615,6 +1601,32 @@ fn parse_contrast_curve_points(data: &[u8]) -> Option<Vec<f32>> {
   if pts.len() >= 4 { Some(pts) } else { None }
 }
 
+fn dcp_picture_style_hint(data: &[u8]) -> Option<String> {
+  let (_, name, base) = parse_picture_control(data)?;
+  let name = name.trim().to_lowercase();
+  let base = base.trim().to_lowercase();
+
+  if !base.is_empty() && base != "auto" {
+    return Some(base);
+  }
+  if !name.is_empty() && name != "auto" {
+    Some(name)
+  } else {
+    None
+  }
+}
+
+fn is_custom_flexible_color(data: &[u8]) -> bool {
+  let Some((_, name, base)) = parse_picture_control(data) else {
+    return false;
+  };
+  let name = name.trim();
+  let base = base.trim();
+  base.eq_ignore_ascii_case("flexible color")
+    && !name.is_empty()
+    && !name.eq_ignore_ascii_case(base)
+}
+
 #[cfg(test)]
 mod recipe_tests {
   use super::*;
@@ -1629,6 +1641,8 @@ mod recipe_tests {
     assert_eq!(ver, "0310");
     assert_eq!(name, "KG200");
     assert_eq!(base, "FLEXIBLE COLOR");
+    assert_eq!(dcp_picture_style_hint(&d).as_deref(), Some("flexible color"));
+    assert!(is_custom_flexible_color(&d));
   }
 
   #[test]
@@ -1641,6 +1655,8 @@ mod recipe_tests {
     assert_eq!(ver, "0100");
     assert_eq!(name, "STANDARD");
     assert_eq!(base, "STANDARD");
+    assert_eq!(dcp_picture_style_hint(&d).as_deref(), Some("standard"));
+    assert!(!is_custom_flexible_color(&d));
   }
 
   #[test]
