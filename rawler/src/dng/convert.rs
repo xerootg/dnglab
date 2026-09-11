@@ -466,33 +466,15 @@ where
     // Inject the normalized camera recipe (Nikon Picture Control, …) as
     // lb:recipe JSON so the editor can seed slider defaults on open. Synthesizes
     // a minimal XMP packet when the source carries none. See docs/camera-recipes.md.
-    if let Some(mut recipe) = decoder.recipe(rawfile, &raw_params)? {
-      // Measure the in-body look directly: fit per-channel display-space curves
-      // from a neutral develop to the camera's embedded JPEG preview, and carry
-      // them in the recipe. This reproduces tone + colour + WB + Active
-      // D-Lighting's global component far more faithfully than the static
-      // ADL-level EV seed (which it supersedes). Best-effort: a failure here
-      // leaves the metadata-only recipe intact. See the ADL design note.
-      if recipe.color_curves.is_none() {
-        let neutral = RawDevelop::default()
-          .develop_intermediate(&rawimage)
-          .ok()
-          .and_then(|img| img.to_dynamic_image());
-        let preview = decoder.preview_image(rawfile, &raw_params).ok().flatten();
-        if let (Some(neutral), Some(preview)) = (neutral, preview) {
-          if let Some(curves) = fit_color_curves(&neutral, &preview) {
-            recipe.color_curves = Some(curves);
-            // The measured curves carry the brightening; drop the static EV seed
-            // so the two don't stack (one-lane rule).
-            recipe.exposure = None;
-            // Safety guard: the per-channel colorCurves are the look carrier, so a
-            // stale display-space NEF ContrastCurve in `recipe.tone` (from nef.rs)
-            // must never survive into the emitted recipe — the editor would feed it
-            // to the linear lumPoints lane and double-encode it. Clear it here.
-            recipe.tone = None;
-          }
-        }
-      }
+    //
+    // colorCurves is deliberately NOT fit here anymore. It comes exclusively
+    // from the server-side DB seed (rust-renderer/src/jobs.rs::run_look_fit),
+    // which fits against the renderer's real neutral (post DCP profile +
+    // BaselineExposure). Fitting it here used a bare RawDevelop neutral,
+    // missing both of those, so it produced a worse curve that raced the DB
+    // seed and made the editor's look flip once the correct job landed. See
+    // docs/learned-look-fit.md.
+    if let Some(recipe) = decoder.recipe(rawfile, &raw_params)? {
       xpacket = inject_recipe_xmp(xpacket, &recipe);
     }
     if let Some(pkt) = xpacket {
@@ -732,6 +714,115 @@ pub fn fit_color_curves(neutral: &DynamicImage, preview: &DynamicImage) -> Optio
   Some(curves)
 }
 
+/// Cross-channel look-residual matrix for the Panasonic Lumix DMC-GM5
+/// (neutral-linear -> preview-linear), validated by leave-one-out
+/// cross-validation across 38 real GM5 frames — see
+/// `ml/look-fit/analyze_panasonic.py` and its saved output
+/// `ml/look-fit/out/panasonic_analysis.json` (`pooled_matrix`).
+///
+/// `fit_color_curves` alone (a per-channel display tone/color curve) only
+/// captures about half of this camera's in-body Photo Style look. A
+/// per-frame cross-channel matrix fit on top of the colorCurves residual
+/// scatters across frames (scene-content overfit — NOT usable), but the
+/// single matrix POOLED across all 38 frames generalizes to held-out
+/// frames: mean held-out look MAE improved from 5.44 (colorCurves only) to
+/// 4.46 (this matrix applied before colorCurves), 37/38 frames improved.
+/// That stability is what makes it safe to ship as a fixed constant rather
+/// than a per-photo fit.
+const PANASONIC_GM5_LOOK_MATRIX: [[f32; 3]; 3] = [
+  [1.164_212_6, -0.172_941_78, -0.126_606_12],
+  [0.066_754_55, 0.869_146_57, -0.041_138_878],
+  [-0.098_209_05, -0.160_346_99, 1.171_807_7],
+];
+
+/// # STATUS: validated but NOT currently wired into production
+///
+/// This matrix and its gate are real, evidence-backed work (see
+/// [`PANASONIC_GM5_LOOK_MATRIX`]'s doc comment and the
+/// `gm5_pooled_matrix_beats_colorcurves_alone_on_real_frames` corpus test
+/// below), but **no render path calls [`apply_look_matrix_srgb`] today.**
+/// `rust-renderer/src/jobs.rs::run_look_fit` briefly did (fitting
+/// `colorCurves` against a matrix-corrected neutral), but that was reverted:
+/// the fitted `colorCurves` gets persisted to `photos.edit_values` and is
+/// later *applied at render time* (`rust-renderer/src/render.rs`'s
+/// `build_lut` → the mega_shader LUT stage) to the plain, UNCORRECTED
+/// neutral, on every render backend (browser WASM, native Tauri, server
+/// export). So the curve would have been fit against
+/// `curve(matrix(neutral))` but applied as `curve(raw_neutral)` — a
+/// different function in general, since the matrix has real off-diagonal
+/// terms — which is unvalidated and could be neutral-to-worse for every
+/// real GM5 shooter, not the "beats colorCurves alone" result the corpus
+/// test actually measured.
+///
+/// Correct integration requires applying this matrix at the SAME point the
+/// DCP `ColorMatrix` is already baked in (see `docs/camera-profiles.md`) —
+/// i.e. composed into the shared decode-time color pipeline — in BOTH the
+/// native `rust-renderer` decode path and the browser's separate
+/// `wasm-utif` decoder, so every render of a GM5 photo (including the one
+/// `fit_color_curves` is fit against) sees the same corrected basis. That
+/// is a bigger, higher-blast-radius change than a per-camera pre-fit
+/// step and is intentionally deferred; see `docs/learned-look-fit.md`.
+///
+/// Returns the validated [`PANASONIC_GM5_LOOK_MATRIX`] when `clean_make` /
+/// `clean_model` identify the EXACT camera body it was derived and
+/// cross-validated for — Panasonic Lumix DMC-GM5 — or `None` for every
+/// other camera, including every other Panasonic body.
+///
+/// `clean_make` / `clean_model` must be the same normalized strings this
+/// codebase already uses for exact camera-model matching (`RawImage`'s /
+/// `RawMetadata`'s `clean_make/clean_model` — see the `unique_model` built
+/// from them just above in [`internal_convert`] and consumed by
+/// [`crate::dcp::find_dcp`]). Comparison here is a plain string match on
+/// those already-normalized values, same as e.g. `raf.rs`'s
+/// `self.camera.clean_model == "DBP for GX680"` — deliberately NOT
+/// broadened to a prefix/substring/case-insensitive match on the raw
+/// vendor Make/Model, so an unrelated Panasonic body can never silently
+/// pick this up.
+///
+/// This gate is intentionally narrow. Only the GM5 has been validated this
+/// way (see [`PANASONIC_GM5_LOOK_MATRIX`]'s doc comment); applying this
+/// matrix to any other camera — even another Panasonic RW2 body — would be
+/// an unvalidated correction with no evidence it helps, which is exactly
+/// the failure mode this feature exists to avoid repeating. Adding another
+/// body means validating its own matrix and adding its own guarded arm
+/// here, not loosening this one.
+pub fn panasonic_gm5_look_matrix(clean_make: &str, clean_model: &str) -> Option<[[f32; 3]; 3]> {
+  if clean_make == "Panasonic" && clean_model == "DMC-GM5" {
+    Some(PANASONIC_GM5_LOOK_MATRIX)
+  } else {
+    None
+  }
+}
+
+/// Apply a 3x3 matrix to a display-referred sRGB image in LINEAR light:
+/// decode sRGB -> linear (`srgb_invert_gamma`), matrix-multiply each pixel
+/// (`out[row] = sum_col matrix[row][col] * lin[col]`), clamp negative
+/// results (an off-diagonal-heavy matrix like [`PANASONIC_GM5_LOOK_MATRIX`]
+/// can produce them), then re-encode linear -> sRGB (`srgb_apply_gamma`).
+///
+/// This mirrors `ml/look-fit/analyze_panasonic.py`'s `look_after()`
+/// methodology (`PL.srgb_decode(neutral) @ M.T` in linear, then re-encode)
+/// using rawler's own sRGB gamma helpers rather than reimplementing the
+/// gamma math. Used to pre-correct the neutral develop for a validated
+/// per-camera look-residual matrix (see [`panasonic_gm5_look_matrix`])
+/// before fitting `fit_color_curves` against the in-body preview.
+pub fn apply_look_matrix_srgb(img: &DynamicImage, matrix: &[[f32; 3]; 3]) -> DynamicImage {
+  let mut rgb = img.to_rgb8();
+  for px in rgb.pixels_mut() {
+    let lin = [
+      crate::imgop::srgb::srgb_invert_gamma(px[0] as f32 / 255.0),
+      crate::imgop::srgb::srgb_invert_gamma(px[1] as f32 / 255.0),
+      crate::imgop::srgb::srgb_invert_gamma(px[2] as f32 / 255.0),
+    ];
+    for (c, row) in matrix.iter().enumerate() {
+      let v = row[0] * lin[0] + row[1] * lin[1] + row[2] * lin[2];
+      let enc = crate::imgop::srgb::srgb_apply_gamma(v.max(0.0));
+      px[c] = (enc.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    }
+  }
+  DynamicImage::ImageRgb8(rgb)
+}
+
 /// Build the `<rdf:Description>` XMP fragment carrying the normalized camera
 /// recipe as `lb:recipe` JSON. See `docs/camera-recipes.md`.
 fn recipe_xmp_fragment(recipe: &crate::recipe::Recipe) -> Option<String> {
@@ -926,5 +1017,170 @@ mod fit_color_curves_tests {
         "channel {name}: genuine non-crushed toe must be preserved, got y(0)={lift:.3} (over-flattened)"
       );
     }
+  }
+
+  // -------------------------------------------------------------------
+  // Panasonic DMC-GM5 look-residual matrix: gate + effect.
+  // -------------------------------------------------------------------
+  use super::{apply_look_matrix_srgb, panasonic_gm5_look_matrix};
+
+  /// THE regression guard: `panasonic_gm5_look_matrix` must return `None`
+  /// for everything except the exact validated body, including cameras
+  /// that are extremely close by name (a sibling Panasonic GM-series body,
+  /// a case-folded GM5 string) and the Nikon bodies actually in this
+  /// fleet's test/dev set (`Z f` / `Z 7 2` — see
+  /// `dnglab/rawler/data/cameras/nikon/z_f.toml` /
+  /// `z7_mk2.toml` clean_make/clean_model). `fit_color_curves` itself takes
+  /// no camera identity — it cannot be affected by this gate at all, so
+  /// the only place a regression could creep in is this match, which is
+  /// exactly what this test pins.
+  #[test]
+  fn gm5_matrix_gate_is_exact_and_narrow() {
+    // The one body that must match.
+    assert!(panasonic_gm5_look_matrix("Panasonic", "DMC-GM5").is_some());
+
+    // Nikon bodies from this fleet's own camera database — completely
+    // unrelated make, must never match.
+    assert!(panasonic_gm5_look_matrix("Nikon", "Z f").is_none());
+    assert!(panasonic_gm5_look_matrix("Nikon", "Z 7 2").is_none());
+
+    // A sibling Panasonic body one digit off — must NOT match. This is the
+    // exact "generalize to any Panasonic/any RW2" mistake this gate exists
+    // to prevent.
+    assert!(panasonic_gm5_look_matrix("Panasonic", "DMC-GM1").is_none());
+    assert!(panasonic_gm5_look_matrix("Panasonic", "DC-G9").is_none());
+
+    // Right model, wrong (or missing) make.
+    assert!(panasonic_gm5_look_matrix("", "DMC-GM5").is_none());
+    assert!(panasonic_gm5_look_matrix("Leica", "DMC-GM5").is_none());
+
+    // Case / whitespace variants must NOT loosen the match — clean_make and
+    // clean_model are already-normalized values from rawler's own camera
+    // database (see gm5.toml), so an exact match is the correct, narrowest
+    // reading of "reuse the same normalization" and must not be widened to
+    // case-insensitive or substring matching later.
+    assert!(panasonic_gm5_look_matrix("panasonic", "dmc-gm5").is_none());
+    assert!(panasonic_gm5_look_matrix("Panasonic", "DMC-GM5 ").is_none());
+    assert!(panasonic_gm5_look_matrix("Panasonic", " DMC-GM5").is_none());
+
+    // Empty / garbage identity.
+    assert!(panasonic_gm5_look_matrix("", "").is_none());
+  }
+
+  /// A camera that fails the gate must be *completely* unaffected: the
+  /// caller never even has a matrix to apply, so `fit_color_curves`'s
+  /// output for a non-GM5 photo is byte-identical whether or not this
+  /// feature exists. This exercises the general `gate -> Option<matrix> ->
+  /// apply_look_matrix_srgb only if Some` call pattern a future caller
+  /// would use, with a non-GM5 identity — it is a unit test of
+  /// `panasonic_gm5_look_matrix`/`apply_look_matrix_srgb` in isolation, not
+  /// a claim about what any current production caller does (nothing in
+  /// production calls `apply_look_matrix_srgb` today — see the STATUS note
+  /// on [`panasonic_gm5_look_matrix`]).
+  #[test]
+  fn non_gm5_camera_fit_is_unaffected_by_the_matrix_feature() {
+    let (neutral, preview) = pair(|t| {
+      let v = 0.10 + 0.80 * t;
+      ((v, v, v), ((v + 0.05).min(1.0), (v * 0.9), (v + 0.02).min(1.0)))
+    });
+    let plain = fit_color_curves(&neutral, &preview);
+
+    // Simulate exactly what `run_look_fit` does: gate on camera identity,
+    // only transform `neutral` when `Some`.
+    let gated = match panasonic_gm5_look_matrix("Nikon", "Z f") {
+      Some(matrix) => apply_look_matrix_srgb(&neutral, &matrix),
+      None => neutral.clone(),
+    };
+    let gated_curves = fit_color_curves(&gated, &preview);
+
+    assert_eq!(plain, gated_curves, "a non-GM5 camera must produce the exact same fit_color_curves result with or without the matrix feature");
+  }
+
+  /// Offline-corpus validation of the FITTING APPROACH, on real GM5 frames:
+  /// applying `PANASONIC_GM5_LOOK_MATRIX` (in linear light, via
+  /// `apply_look_matrix_srgb`) before `fit_color_curves` must measurably
+  /// beat fitting `fit_color_curves` on the uncorrected neutral — mirroring
+  /// the leave-one-out result in `ml/look-fit/out/panasonic_analysis.json`
+  /// (held-out look MAE 5.44 -> 4.46 across all 38 frames; here on a
+  /// handful of them, same direction). This calls
+  /// `apply_look_matrix_srgb`/`fit_color_curves` directly, in isolation —
+  /// it does NOT exercise `run_look_fit` or any render path, and is not a
+  /// claim about current production behavior (no production caller applies
+  /// this matrix today — see the STATUS note on
+  /// [`panasonic_gm5_look_matrix`]). Needs the real (neutral, preview)
+  /// fixture pairs that live in the parent RAW-Manager monorepo
+  /// (`ml/look-fit/data/`), outside this submodule — same
+  /// `samplecheck`-gated pattern as `dng/writer.rs`'s
+  /// `convert_canon_cr3_to_dng` (which needs `RAWLER_RAWDB`).
+  #[cfg(feature = "samplecheck")]
+  #[test]
+  fn gm5_pooled_matrix_beats_colorcurves_alone_on_real_frames() {
+    let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ml/look-fit/data");
+    let ids = ["8340806", "8340727", "8350005"];
+
+    let matrix = panasonic_gm5_look_matrix("Panasonic", "DMC-GM5").expect("GM5 must match its own validated matrix");
+
+    let mut base_total = 0.0f64;
+    let mut corrected_total = 0.0f64;
+    // Content-sniffed load (not extension-based `image::open`): the
+    // `neutral_*.png` fixtures are actually JPEG bytes under a `.png` name
+    // (confirmed via `file(1)` — their own EXIF even carries
+    // manufacturer=Panasonic / model=DMC-GM5), while `preview_*.ppm` is
+    // genuine Netpbm. `image::load_from_memory` guesses from the magic
+    // bytes, same as `run_look_fit`'s own `image::load_from_memory(&neutral_jpeg)`.
+    let load = |path: &std::path::Path| -> DynamicImage {
+      let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+      image::load_from_memory(&bytes).unwrap_or_else(|e| panic!("decode {}: {e}", path.display()))
+    };
+    for id in ids {
+      let neutral_path = data_dir.join(format!("neutral_{id}.png"));
+      let preview_path = data_dir.join(format!("preview_{id}.ppm"));
+      let neutral = load(&neutral_path);
+      let preview = load(&preview_path);
+
+      let base_curves = fit_color_curves(&neutral, &preview).expect("baseline colorCurves fit must succeed on a real GM5 frame");
+      base_total += curve_mae(&neutral, &preview, &base_curves);
+
+      let corrected_neutral = apply_look_matrix_srgb(&neutral, &matrix);
+      let corrected_curves = fit_color_curves(&corrected_neutral, &preview).expect("matrix-corrected colorCurves fit must succeed");
+      corrected_total += curve_mae(&corrected_neutral, &preview, &corrected_curves);
+    }
+    let n = ids.len() as f64;
+    let (base_mae, corrected_mae) = (base_total / n, corrected_total / n);
+    assert!(
+      corrected_mae < base_mae,
+      "matrix-corrected fit must beat colorCurves-only on real GM5 frames: base={base_mae:.4} corrected={corrected_mae:.4}"
+    );
+  }
+
+  /// Same piecewise-linear evaluation `fit_color_curves`'s own internal
+  /// regression guard uses (uniform x knots in `[0,1]`), on the same
+  /// 256x171 grid, so this measures exactly what the fit optimizes against.
+  #[cfg(feature = "samplecheck")]
+  fn curve_mae(neutral: &DynamicImage, preview: &DynamicImage, curves: &[crate::recipe::ToneCurve; 3]) -> f64 {
+    let n = neutral.resize_exact(256, 171, image::imageops::FilterType::Triangle).to_rgb8();
+    let p = preview.resize_exact(256, 171, image::imageops::FilterType::Triangle).to_rgb8();
+    let (np, pp) = (n.as_raw(), p.as_raw());
+    let eval = |pts: &[f32], x: f32| -> f32 {
+      let nk = pts.len() / 2;
+      if nk < 2 {
+        return x;
+      }
+      let t = x.clamp(0.0, 1.0) * (nk - 1) as f32;
+      let i = (t.floor() as usize).min(nk - 2);
+      let f = t - i as f32;
+      pts[2 * i + 1] * (1.0 - f) + pts[2 * (i + 1) + 1] * f
+    };
+    let mut err = 0.0f64;
+    let px = np.len() / 3;
+    for i in 0..px {
+      for c in 0..3 {
+        let b = np[i * 3 + c] as f32 / 255.0;
+        let q = pp[i * 3 + c] as f32 / 255.0;
+        let f = if curves[c].is_empty() { b } else { eval(&curves[c].points, b) };
+        err += (f - q).abs() as f64;
+      }
+    }
+    err / (px * 3) as f64
   }
 }

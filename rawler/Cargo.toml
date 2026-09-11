@@ -57,6 +57,12 @@ env_logger = "0.11"
 serde_yaml = "=0.8" # TODO - breaks camera tests, update to 0.9 when fixed
 anyhow = "1.0"
 approx = "0.5.1"
+# Test-only decode support for the Panasonic GM5 look-matrix fixture images
+# (ml/look-fit/data/{neutral,preview}_*.{png,ppm}) — the production `image`
+# dependency above only enables "jpeg" (all it needs for embedded RAW
+# previews). Cargo unifies features across dependency kinds for test builds
+# only, so this does not change the crate's normal-build feature set.
+image = { version = "0.25", default-features = false, features = ["png", "pnm"] }
 
 [build-dependencies]
 glob = "0.3"
