@@ -735,33 +735,96 @@ const PANASONIC_GM5_LOOK_MATRIX: [[f32; 3]; 3] = [
   [-0.098_209_05, -0.160_346_99, 1.171_807_7],
 ];
 
-/// # STATUS: validated but NOT currently wired into production
+/// # STATUS: wired into production — as a POST-GAMMA GPU shader stage, NOT
+/// a decode-time colour-pipeline matrix
 ///
 /// This matrix and its gate are real, evidence-backed work (see
 /// [`PANASONIC_GM5_LOOK_MATRIX`]'s doc comment and the
 /// `gm5_pooled_matrix_beats_colorcurves_alone_on_real_frames` corpus test
-/// below), but **no render path calls [`apply_look_matrix_srgb`] today.**
-/// `rust-renderer/src/jobs.rs::run_look_fit` briefly did (fitting
-/// `colorCurves` against a matrix-corrected neutral), but that was reverted:
-/// the fitted `colorCurves` gets persisted to `photos.edit_values` and is
-/// later *applied at render time* (`rust-renderer/src/render.rs`'s
-/// `build_lut` → the mega_shader LUT stage) to the plain, UNCORRECTED
-/// neutral, on every render backend (browser WASM, native Tauri, server
-/// export). So the curve would have been fit against
-/// `curve(matrix(neutral))` but applied as `curve(raw_neutral)` — a
-/// different function in general, since the matrix has real off-diagonal
-/// terms — which is unvalidated and could be neutral-to-worse for every
-/// real GM5 shooter, not the "beats colorCurves alone" result the corpus
-/// test actually measured.
+/// below). A first attempt wired it into `rust-renderer/src/jobs.rs::run_look_fit`
+/// (fitting `colorCurves` against a matrix-corrected neutral, via
+/// [`apply_look_matrix_srgb`]), but that was reverted: the fitted
+/// `colorCurves` gets persisted to `photos.edit_values` and is later
+/// *applied at render time* to the plain, UNCORRECTED neutral — so the
+/// curve would have been fit against `curve(matrix(neutral))` but applied
+/// as `curve(raw_neutral)`, an unvalidated mismatch.
 ///
-/// Correct integration requires applying this matrix at the SAME point the
-/// DCP `ColorMatrix` is already baked in (see `docs/camera-profiles.md`) —
-/// i.e. composed into the shared decode-time color pipeline — in BOTH the
-/// native `rust-renderer` decode path and the browser's separate
-/// `wasm-utif` decoder, so every render of a GM5 photo (including the one
-/// `fit_color_curves` is fit against) sees the same corrected basis. That
-/// is a bigger, higher-blast-radius change than a per-camera pre-fit
-/// step and is intentionally deferred; see `docs/learned-look-fit.md`.
+/// **The domain fact that earlier guidance here got wrong:** this matrix
+/// was derived and cross-validated (`ml/look-fit/analyze_panasonic.py`'s
+/// `look_after()`) against `srgb_decode(neutral) @ M.T`, where `neutral` is
+/// the FULLY RENDERED, `EditValues=0`, DISPLAY-referred sRGB neutral image —
+/// i.e. it is a correction on display-referred pixels, taken *after* the
+/// entire scene-linear decode/WB/exposure/profile-tone-curve/highlight-
+/// rolloff/HPMINDE/gamma-encode chain. It does **not** belong at the same
+/// architectural slot as a DCP `ColorMatrix` (which operates on
+/// scene-referred linear camera data, very early in the pipeline, before
+/// white balance — see `docs/camera-profiles.md`), and it is not composed
+/// into any shared decode-time colour pipeline (native `rust-renderer` or
+/// the browser's `wasm-utif`/`glfx-es6` decoder).
+///
+/// **Where it actually lives:** `rust-renderer/shaders/mega_shader.wgsl`,
+/// as its own stage ("6d.") immediately after "6c. Gamma encode" (the
+/// scene-linear → display-sRGB transition) and before "7. Contrast" — i.e.
+/// under every user edit lane, since this is camera-inherent colour
+/// science, not a user adjustment. It decodes the gamma-encoded colour back
+/// to linear, applies the matrix (mirroring [`apply_look_matrix_srgb`]'s
+/// decode → matmul → clamp-negatives → re-encode exactly), and is gated
+/// per-photo by a `MegaUniforms` flag (`rust-renderer/src/pipeline.rs`)
+/// rather than per-pixel branching — a pure passthrough (no matrix multiply
+/// performed) for every camera the gate below rejects. The flag + matrix
+/// are set by `rust-renderer/src/render.rs::render_decoded_image`, which
+/// calls THIS function with the camera identity threaded onto
+/// `decode::DecodedImage::clean_make`/`clean_model` by the decode paths
+/// (`decode_direct`'s DNG branches, `decode_via_dng` — via its temp-DNG
+/// round trip, and `decode_raw_neutral_native`).
+///
+/// Because `render_photo_by_id` (server export/download/thumbnail/share
+/// links), the Tauri desktop app's local export/share command
+/// (`frontend/src-tauri/src/render_cmds.rs::raw_render_with_edits`, which
+/// calls the identical compiled `decode_raw_full` → `render_decoded_image`),
+/// AND `render_photo_neutral_native` (the look_fit job's fit-time neutral)
+/// all funnel into the same `render_decoded_image` → GPU pipeline, this
+/// wiring makes the fit-time neutral and every real render agree
+/// automatically — no GM5-specific code needed in
+/// `rust-renderer/src/jobs.rs::run_look_fit`, which still calls
+/// `fit_color_curves` directly on the plain neutral for every camera, GM5
+/// included, unchanged. Regression-pinned by
+/// `rust-renderer/tests/look_matrix_tests.rs` (real-GPU, real GM5 + Nikon
+/// DNG fixtures under `ml/look-fit/data/`, `#[ignore]`d — needs local
+/// fixtures, same convention as `decode.rs::lookfit_native_matches_via_dng`).
+///
+/// [`apply_look_matrix_srgb`] itself is still not called by any production
+/// Rust path — the WGSL stage above reimplements its exact math so the
+/// correction can run per-pixel on the GPU — but it remains real, tested
+/// (CPU reference + parity target) and is what the WGSL stage's doc
+/// comment points back to for the algorithm.
+///
+/// **Live-preview parity gap (both web AND the Tauri app's interactive
+/// editor — they share the same JS):** NOT implemented. The Tauri shell
+/// wraps the same React/JS frontend as the web deployment for its
+/// interactive editing session; only its local export command drops down
+/// to native Rust. So while every *finished render* (server or Tauri
+/// export) now carries this correction, dragging sliders live in the
+/// editor — in a browser OR inside the Tauri app — still renders through
+/// `frontend/src/lib/glfx-es6/filters/adjust/megaShader.js`, which does not.
+/// Investigated and deliberately scoped out rather than forced: that GLSL
+/// shader's stage structure maps cleanly (it already has `srgb_decode`/
+/// `srgb_encode` helpers and the identical `color.rgb = srgb_encode(lin)`
+/// → contrast boundary at line ~664), but no source of the *normalized*
+/// `clean_make`/`clean_model` identity this gate requires reaches the
+/// browser today — `GET /api/photos`' `camera` field
+/// (`backend/utils/exif_utils.py::_build_camera_name`) is a free-text
+/// `"{raw EXIF Make} {raw EXIF Model}"` string built from a completely
+/// separate Python/exiftool EXIF read, not rawler's camera-database
+/// `clean_make`/`clean_model` (which can alias/normalize away from the raw
+/// tags — see `decoders/camera.rs`), and `frontend/wasm-utif` (the
+/// browser's own decoder) has no camera-identity matching at all, only raw
+/// FM/CM/AsShotNeutral tag reads. Parsing `camera` client-side to guess
+/// make/model would be exactly the "second, possibly-inconsistent
+/// camera-identity comparison" this gate is designed to avoid. Making it
+/// safe needs new plumbing — e.g. a backend field carrying rawler's actual
+/// `clean_make`/`clean_model` through ingestion into the API response — not
+/// a client-side string split; see `docs/learned-look-fit.md`.
 ///
 /// Returns the validated [`PANASONIC_GM5_LOOK_MATRIX`] when `clean_make` /
 /// `clean_model` identify the EXACT camera body it was derived and
@@ -803,9 +866,14 @@ pub fn panasonic_gm5_look_matrix(clean_make: &str, clean_model: &str) -> Option<
 /// This mirrors `ml/look-fit/analyze_panasonic.py`'s `look_after()`
 /// methodology (`PL.srgb_decode(neutral) @ M.T` in linear, then re-encode)
 /// using rawler's own sRGB gamma helpers rather than reimplementing the
-/// gamma math. Used to pre-correct the neutral develop for a validated
-/// per-camera look-residual matrix (see [`panasonic_gm5_look_matrix`])
-/// before fitting `fit_color_curves` against the in-body preview.
+/// gamma math. This exact algorithm — decode → matmul → clamp-negatives →
+/// re-encode — is what production actually runs, but as its own GPU shader
+/// stage (`rust-renderer/shaders/mega_shader.wgsl`, right after gamma
+/// encode, before any user edit lane) rather than by calling this Rust
+/// function directly; see [`panasonic_gm5_look_matrix`]'s STATUS doc for
+/// where the correction is wired in and why. This CPU implementation is
+/// kept as the validated reference / test fixture (see the corpus test
+/// below), not because a production caller invokes it at runtime.
 pub fn apply_look_matrix_srgb(img: &DynamicImage, matrix: &[[f32; 3]; 3]) -> DynamicImage {
   let mut rgb = img.to_rgb8();
   for px in rgb.pixels_mut() {
@@ -1071,12 +1139,14 @@ mod fit_color_curves_tests {
   /// caller never even has a matrix to apply, so `fit_color_curves`'s
   /// output for a non-GM5 photo is byte-identical whether or not this
   /// feature exists. This exercises the general `gate -> Option<matrix> ->
-  /// apply_look_matrix_srgb only if Some` call pattern a future caller
-  /// would use, with a non-GM5 identity — it is a unit test of
-  /// `panasonic_gm5_look_matrix`/`apply_look_matrix_srgb` in isolation, not
-  /// a claim about what any current production caller does (nothing in
-  /// production calls `apply_look_matrix_srgb` today — see the STATUS note
-  /// on [`panasonic_gm5_look_matrix`]).
+  /// apply_look_matrix_srgb only if Some` call pattern in isolation — it is
+  /// a unit test of `panasonic_gm5_look_matrix`/`apply_look_matrix_srgb`'s
+  /// math, not of `run_look_fit` (which never calls either function — the
+  /// production correction lives in the mega_shader GPU stage instead; see
+  /// the STATUS note on [`panasonic_gm5_look_matrix`]). The equivalent
+  /// invariant for the real, wired-in shader stage — a non-GM5 camera's
+  /// rendered output is unaffected — is pinned by
+  /// `rust-renderer/tests/look_matrix_tests.rs::non_gm5_camera_is_unaffected_by_the_look_matrix_stage`.
   #[test]
   fn non_gm5_camera_fit_is_unaffected_by_the_matrix_feature() {
     let (neutral, preview) = pair(|t| {
@@ -1096,21 +1166,25 @@ mod fit_color_curves_tests {
     assert_eq!(plain, gated_curves, "a non-GM5 camera must produce the exact same fit_color_curves result with or without the matrix feature");
   }
 
-  /// Offline-corpus validation of the FITTING APPROACH, on real GM5 frames:
-  /// applying `PANASONIC_GM5_LOOK_MATRIX` (in linear light, via
+  /// Offline-corpus validation of the underlying matrix math, on real GM5
+  /// frames: applying `PANASONIC_GM5_LOOK_MATRIX` (in linear light, via
   /// `apply_look_matrix_srgb`) before `fit_color_curves` must measurably
   /// beat fitting `fit_color_curves` on the uncorrected neutral — mirroring
   /// the leave-one-out result in `ml/look-fit/out/panasonic_analysis.json`
   /// (held-out look MAE 5.44 -> 4.46 across all 38 frames; here on a
   /// handful of them, same direction). This calls
-  /// `apply_look_matrix_srgb`/`fit_color_curves` directly, in isolation —
-  /// it does NOT exercise `run_look_fit` or any render path, and is not a
-  /// claim about current production behavior (no production caller applies
-  /// this matrix today — see the STATUS note on
-  /// [`panasonic_gm5_look_matrix`]). Needs the real (neutral, preview)
-  /// fixture pairs that live in the parent RAW-Manager monorepo
-  /// (`ml/look-fit/data/`), outside this submodule — same
-  /// `samplecheck`-gated pattern as `dng/writer.rs`'s
+  /// `apply_look_matrix_srgb`/`fit_color_curves` directly, in isolation, as
+  /// a CPU-only proof of the matrix's effect — it does NOT exercise
+  /// `run_look_fit` or any render path (the production correction is a GPU
+  /// shader stage this Rust function is a reference for, not a call target
+  /// — see the STATUS note on [`panasonic_gm5_look_matrix`]). The
+  /// production-path equivalent — that a real render and the look_fit job's
+  /// neutral get the SAME correction — is
+  /// `rust-renderer/tests/look_matrix_tests.rs::gm5_fit_time_and_render_time_apply_the_same_correction`,
+  /// which renders through the actual `mega_shader.wgsl` stage on GPU.
+  /// Needs the real (neutral, preview) fixture pairs that live in the
+  /// parent RAW-Manager monorepo (`ml/look-fit/data/`), outside this
+  /// submodule — same `samplecheck`-gated pattern as `dng/writer.rs`'s
   /// `convert_canon_cr3_to_dng` (which needs `RAWLER_RAWDB`).
   #[cfg(feature = "samplecheck")]
   #[test]
