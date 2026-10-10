@@ -254,7 +254,11 @@ impl Opened {
           w = pw;
           h = ph;
         }
-        if bytes.len() < 4 || w == 0 || h == 0 {
+        if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 || w == 0 || h == 0 {
+          return Ok(None);
+        }
+        if w > MAX_IMAGE_EDGE || h > MAX_IMAGE_EDGE {
+          log::warn!("Embedded JPEG claims {w}x{h}, ignoring it");
           return Ok(None);
         }
         Ok(Some((bytes, w, h)))
@@ -274,6 +278,17 @@ impl Opened {
       _ => 1,
     }
   }
+}
+
+/// Effective orientation of a decoded frame: the EXIF value when present,
+/// otherwise what the decoder put on the RawImage (only DNG/QTK set it; every
+/// other decoder leaves `Orientation::Normal`), otherwise upright.
+pub fn effective_orientation(md: &RawMetadata, raw: &RawImage) -> u16 {
+  if let Some(o) = md.exif.orientation.filter(|o| (1..=8).contains(o)) {
+    return o;
+  }
+  let o = raw.orientation.to_u16();
+  if (1..=8).contains(&o) { o } else { 1 }
 }
 
 /// Dimensions of the "default crop" (what a viewer shows) and of the full
@@ -350,49 +365,155 @@ pub fn encode_jpeg(rgb: &RgbImage, opts: &JpegOptions, exif_payload: Option<&[u8
   Ok(out)
 }
 
-fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
-  let mut f = File::create(path).map_err(|e| Error::new(format!("Cannot create {}: {e}", path.display())))?;
-  f.write_all(bytes)?;
-  f.flush()?;
+/// Largest sensor frame the rendering paths will develop. Developing needs
+/// roughly 14 bytes per pixel (u16 raw + f32 RGB + copies); 150 MP is the
+/// largest medium-format back on the market (151 MP) and already ~2 GB of RAM.
+pub const MAX_RENDER_MEGAPIXELS: usize = 160;
+/// Longest edge accepted for a sensor frame or an embedded JPEG.
+pub const MAX_IMAGE_EDGE: u32 = 30_000;
+/// Memory budget handed to the `image` decoder for embedded JPEGs.
+pub const MAX_JPEG_DECODE_BYTES: u64 = 384 * 1024 * 1024;
+
+/// Refuse to develop frames that would exhaust memory before rawler's own
+/// 500 MP structural cap. An OOM is an abort, not a panic, so it has to be
+/// prevented rather than caught.
+pub fn check_render_budget(width: usize, height: usize) -> Result<()> {
+  let pixels = width.checked_mul(height).unwrap_or(usize::MAX);
+  if width == 0 || height == 0 {
+    return Err(Error::new("Sensor frame has zero size"));
+  }
+  if width > MAX_IMAGE_EDGE as usize || height > MAX_IMAGE_EDGE as usize || pixels > MAX_RENDER_MEGAPIXELS * 1_000_000 {
+    return Err(Error::new(format!(
+      "Sensor frame {width}x{height} exceeds the render budget ({MAX_RENDER_MEGAPIXELS} MP, {MAX_IMAGE_EDGE} px per edge)"
+    )));
+  }
   Ok(())
 }
 
-fn remove_partial(path: &Path) {
-  let _ = std::fs::remove_file(path);
+/// Decode a JPEG from memory with explicit dimension and allocation limits.
+pub fn decode_jpeg_limited(bytes: &[u8]) -> Result<DynamicImage> {
+  let mut limits = image::Limits::default();
+  limits.max_image_width = Some(MAX_IMAGE_EDGE);
+  limits.max_image_height = Some(MAX_IMAGE_EDGE);
+  limits.max_alloc = Some(MAX_JPEG_DECODE_BYTES);
+  let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+  reader.set_format(image::ImageFormat::Jpeg);
+  reader.limits(limits);
+  Ok(reader.decode()?)
+}
+
+/// Sibling temp path used for atomic output writes.
+fn temp_path_for(output: &Path) -> PathBuf {
+  let mut name = output.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+  name.push(format!(".{}.tmp", std::process::id()));
+  output.with_file_name(name)
+}
+
+/// Write `bytes` to `path` atomically: the data goes to a sibling temp file
+/// that is renamed over `path` only once fully written, so a failure never
+/// truncates or deletes a pre-existing output and concurrent readers never
+/// see a partial file.
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+  let tmp = temp_path_for(path);
+  let result = (|| -> Result<()> {
+    let mut f = File::create(&tmp).map_err(|e| Error::new(format!("Cannot create {}: {e}", tmp.display())))?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path).map_err(|e| Error::new(format!("Cannot move output into place at {}: {e}", path.display())))?;
+    Ok(())
+  })();
+  if result.is_err() {
+    let _ = std::fs::remove_file(&tmp);
+  }
+  result
+}
+
+/// Orientation (1..8) to apply to a camera-embedded JPEG. The embedded image
+/// is stored in sensor orientation unless it carries its own EXIF orientation,
+/// in which case that value is authoritative. Anything out of range falls back
+/// to the RAW's orientation.
+pub fn embedded_jpeg_orientation(jpeg: &[u8], raw_orientation: u16) -> u16 {
+  match exif_jpeg::jpeg_exif_orientation(jpeg) {
+    Some(o) if (2..=8).contains(&o) => o,
+    _ => raw_orientation,
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Rendering (demosaic + colour) for formats without a usable embedded JPEG
 // ---------------------------------------------------------------------------
 
-/// dcraw-style auto brightness gain: the smallest gain such that `threshold`
-/// of the samples (per channel, worst channel wins) end up clipped at 1.0.
-/// Samples are expected in [0, 1]; the gain is clamped to [1, 16].
-pub fn auto_bright_gain<'a>(channels: impl Iterator<Item = &'a [f32]>, threshold: f32) -> f32 {
-  const BINS: usize = 4096;
-  let mut white = 0.0f32;
-  for samples in channels {
-    if samples.is_empty() {
-      continue;
+/// Per-channel histogram accumulator for the dcraw-style auto brightness.
+struct BrightHistogram {
+  bins: Vec<u32>,
+  count: u64,
+}
+
+const BRIGHT_BINS: usize = 4096;
+
+impl BrightHistogram {
+  fn new() -> Self {
+    Self { bins: vec![0; BRIGHT_BINS], count: 0 }
+  }
+
+  #[inline]
+  fn add(&mut self, v: f32) {
+    // NaN clamps to 0, +inf to 1; `as usize` saturates.
+    let b = (v.clamp(0.0, 1.0) * (BRIGHT_BINS - 1) as f32) as usize;
+    self.bins[b.min(BRIGHT_BINS - 1)] += 1;
+    self.count += 1;
+  }
+
+  /// Level (0..1] below which all but `threshold` of the samples fall.
+  fn white(&self, threshold: f32) -> f32 {
+    if self.count == 0 {
+      return 0.0;
     }
-    let mut hist = vec![0u32; BINS];
-    for v in samples {
-      let b = ((v.clamp(0.0, 1.0)) * (BINS - 1) as f32) as usize;
-      hist[b] += 1;
-    }
-    let allowed = (samples.len() as f64 * threshold.clamp(0.0, 0.5) as f64) as u64;
+    let allowed = (self.count as f64 * threshold.clamp(0.0, 0.5) as f64) as u64;
     let mut seen = 0u64;
-    let mut level = BINS - 1;
+    let mut level = BRIGHT_BINS - 1;
     while level > 0 {
-      seen += hist[level] as u64;
+      seen += self.bins[level] as u64;
       if seen > allowed {
         break;
       }
       level -= 1;
     }
-    white = white.max((level as f32 + 1.0) / BINS as f32);
+    (level as f32 + 1.0) / BRIGHT_BINS as f32
   }
+}
+
+fn gain_from_white(white: f32) -> f32 {
   if white <= 0.0 { 1.0 } else { (1.0 / white).clamp(1.0, 16.0) }
+}
+
+/// dcraw-style auto brightness gain: the smallest gain such that `threshold`
+/// of the samples (per channel, worst channel wins) end up clipped at 1.0.
+/// Samples are expected in [0, 1]; the gain is clamped to [1, 16].
+pub fn auto_bright_gain<'a>(channels: impl Iterator<Item = &'a [f32]>, threshold: f32) -> f32 {
+  let mut white = 0.0f32;
+  for samples in channels {
+    let mut h = BrightHistogram::new();
+    for v in samples {
+      h.add(*v);
+    }
+    white = white.max(h.white(threshold));
+  }
+  gain_from_white(white)
+}
+
+/// Same as [`auto_bright_gain`] for interleaved N-channel pixels, built in a
+/// single pass without copying the frame (a 45 MP frame is 540 MB of f32).
+pub fn auto_bright_gain_pixels<const N: usize>(pixels: &[[f32; N]], threshold: f32) -> f32 {
+  let mut hists: Vec<BrightHistogram> = (0..N).map(|_| BrightHistogram::new()).collect();
+  for px in pixels {
+    for c in 0..N {
+      hists[c].add(px[c]);
+    }
+  }
+  let white = hists.iter().map(|h| h.white(threshold)).fold(0.0f32, f32::max);
+  gain_from_white(white)
 }
 
 /// Develop the sensor data into an upright, display-referred sRGB image.
@@ -401,7 +522,8 @@ pub fn auto_bright_gain<'a>(channels: impl Iterator<Item = &'a [f32]>, threshold
 /// X-Trans / 4-colour) -> Fuji rotation -> active area crop -> white balance ->
 /// camera matrix to sRGB -> default crop -> brightness gain -> sRGB gamma
 /// -> EXIF orientation applied to the pixels.
-pub fn render_upright(raw: &RawImage, brightness: Brightness) -> Result<DynamicImage> {
+pub fn render_upright(raw: &RawImage, brightness: Brightness, orientation: u16) -> Result<DynamicImage> {
+  check_render_budget(raw.width, raw.height)?;
   let develop = RawDevelop::new_with(&[
     ProcessingStep::Rescale,
     ProcessingStep::Demosaic,
@@ -421,21 +543,8 @@ pub fn render_upright(raw: &RawImage, brightness: Brightness) -> Result<DynamicI
     Brightness::Auto(threshold) => {
       let g = match &inter {
         Intermediate::Monochrome(p) => auto_bright_gain(std::iter::once(p.data.as_slice()), threshold),
-        Intermediate::ThreeColor(p) => {
-          let flat = p.flatten();
-          let n = flat.len() / 3;
-          let mut ch = [Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n)];
-          for px in flat.chunks_exact(3) {
-            ch[0].push(px[0]);
-            ch[1].push(px[1]);
-            ch[2].push(px[2]);
-          }
-          auto_bright_gain(ch.iter().map(|c| c.as_slice()), threshold)
-        }
-        Intermediate::FourColor(p) => {
-          let flat = p.flatten();
-          auto_bright_gain(std::iter::once(flat.as_slice()), threshold)
-        }
+        Intermediate::ThreeColor(p) => auto_bright_gain_pixels(p.pixels(), threshold),
+        Intermediate::FourColor(p) => auto_bright_gain_pixels(p.pixels(), threshold),
       };
       log::debug!("auto brightness gain: {g:.3}");
       g
@@ -458,7 +567,7 @@ pub fn render_upright(raw: &RawImage, brightness: Brightness) -> Result<DynamicI
   }
 
   let img = inter.to_dynamic_image().ok_or_else(|| Error::new("Developed image has invalid dimensions"))?;
-  Ok(apply_orientation(img, raw.orientation.to_u16()))
+  Ok(apply_orientation(img, orientation))
 }
 
 // ---------------------------------------------------------------------------
@@ -491,27 +600,28 @@ pub fn convert_to_dng(input: &Path, output: &Path, opts: &DngOptions) -> Result<
     dcp_file: opts.dcp_file.clone(),
   };
 
-  let file = File::create(output).map_err(|e| Error::new(format!("Cannot create {}: {e}", output.display())))?;
-  let mut writer = BufWriter::new(file);
+  // Author into a sibling temp file and rename it over `output` on success so a
+  // failed conversion never truncates or deletes an existing file.
+  let tmp = temp_path_for(output);
   let result = guard(|| {
+    let file = File::create(&tmp).map_err(|e| Error::new(format!("Cannot create {}: {e}", tmp.display())))?;
+    let mut writer = BufWriter::new(file);
     convert_raw_file(input, &mut writer, &params)?;
     writer.flush()?;
+    writer.get_ref().sync_all()?;
+    drop(writer);
+    std::fs::rename(&tmp, output).map_err(|e| Error::new(format!("Cannot move output into place at {}: {e}", output.display())))?;
     Ok(())
   });
   if result.is_err() {
-    drop(writer);
-    remove_partial(output);
+    let _ = std::fs::remove_file(&tmp);
   }
   result
 }
 
 /// Export a RAW file as JPEG at `output`.
 pub fn convert_to_jpeg(input: &Path, output: &Path, opts: &JpegOptions) -> Result<JpegOutcome> {
-  let result = guard(|| convert_to_jpeg_inner(input, output, opts));
-  if result.is_err() {
-    remove_partial(output);
-  }
-  result
+  guard(|| convert_to_jpeg_inner(input, output, opts))
 }
 
 fn convert_to_jpeg_inner(input: &Path, output: &Path, opts: &JpegOptions) -> Result<JpegOutcome> {
@@ -544,13 +654,7 @@ fn convert_to_jpeg_inner(input: &Path, output: &Path, opts: &JpegOptions) -> Res
         EmbeddedJpegPolicy::Never => false,
       };
       if accept {
-        // Embedded JPEGs are stored in sensor orientation unless the camera already
-        // rotated them (then their own EXIF says so and the sensor orientation does
-        // not apply).
-        let orientation = match exif_jpeg::jpeg_exif_orientation(&bytes) {
-          Some(o) if o != 1 && o != 0 => o,
-          _ => raw_orientation,
-        };
+        let orientation = embedded_jpeg_orientation(&bytes, raw_orientation);
         let (bytes, exif_embedded) = if opts.embed_exif {
           match exif_jpeg::build_exif_app1_payload(&md, orientation, &opts.software).and_then(|p| exif_jpeg::splice_exif_app1(&bytes, &p)) {
             Ok(spliced) => (spliced, true),
@@ -562,7 +666,7 @@ fn convert_to_jpeg_inner(input: &Path, output: &Path, opts: &JpegOptions) -> Res
         } else {
           (bytes, false)
         };
-        write_file(output, &bytes)?;
+        write_file_atomic(output, &bytes)?;
         return Ok(JpegOutcome {
           used_embedded: true,
           width: w,
@@ -576,14 +680,18 @@ fn convert_to_jpeg_inner(input: &Path, output: &Path, opts: &JpegOptions) -> Res
     }
   }
 
-  // Slow path: demosaic and render.
+  // Slow path: demosaic and render. Check the frame size on the cheap
+  // structure-only decode before committing to the real one.
+  if let Some((_, (w, h))) = sensor_dimensions(&opened) {
+    check_render_budget(w, h)?;
+  }
   let raw = opened.raw_image(false)?;
   let brightness = if opts.auto_bright {
     Brightness::Auto(opts.auto_bright_threshold)
   } else {
     Brightness::BaselineExposure
   };
-  let img = render_upright(&raw, brightness)?;
+  let img = render_upright(&raw, brightness, effective_orientation(&md, &raw))?;
   let rgb = img.into_rgb8();
   let (w, h) = rgb.dimensions();
 
@@ -600,7 +708,7 @@ fn convert_to_jpeg_inner(input: &Path, output: &Path, opts: &JpegOptions) -> Res
   };
   let exif_embedded = exif_payload.is_some();
   let bytes = encode_jpeg(&rgb, opts, exif_payload.as_deref())?;
-  write_file(output, &bytes)?;
+  write_file_atomic(output, &bytes)?;
   Ok(JpegOutcome {
     used_embedded: false,
     width: w,
@@ -614,11 +722,7 @@ fn convert_to_jpeg_inner(input: &Path, output: &Path, opts: &JpegOptions) -> Res
 /// `max_dim` pixels (0 = unlimited). Prefers the embedded camera JPEG; when it
 /// fits and no rotation is needed the bytes are copied verbatim.
 pub fn extract_preview(input: &Path, output: &Path, max_dim: u32) -> Result<PreviewOutcome> {
-  let result = guard(|| extract_preview_inner(input, output, max_dim));
-  if result.is_err() {
-    remove_partial(output);
-  }
-  result
+  guard(|| extract_preview_inner(input, output, max_dim))
 }
 
 fn extract_preview_inner(input: &Path, output: &Path, max_dim: u32) -> Result<PreviewOutcome> {
@@ -639,14 +743,14 @@ fn extract_preview_inner(input: &Path, output: &Path, max_dim: u32) -> Result<Pr
     software: DEFAULT_SOFTWARE.to_string(),
   };
 
-  // Writes `img` rotated upright and resized; returns the outcome.
-  let finish = |img: DynamicImage, from_embedded: bool| -> Result<PreviewOutcome> {
+  // Writes `img` rotated upright (by `orient`) and resized; returns the outcome.
+  let finish = |img: DynamicImage, from_embedded: bool, orient: u16| -> Result<PreviewOutcome> {
     let img = fit_within(img, max_dim);
-    let img = apply_orientation(img, orientation);
+    let img = apply_orientation(img, orient);
     let rgb = img.into_rgb8();
     let (w, h) = rgb.dimensions();
     let bytes = encode_jpeg(&rgb, &encode_opts, None)?;
-    write_file(output, &bytes)?;
+    write_file_atomic(output, &bytes)?;
     Ok(PreviewOutcome {
       orientation: 1,
       from_embedded,
@@ -657,19 +761,22 @@ fn extract_preview_inner(input: &Path, output: &Path, max_dim: u32) -> Result<Pr
 
   // 1. Embedded camera JPEG.
   if let Some((bytes, w, h)) = opened.embedded_jpeg()? {
+    // Same rule as the JPEG export: the embedded image's own EXIF orientation
+    // wins, otherwise it sits in sensor orientation.
+    let embedded_orientation = embedded_jpeg_orientation(&bytes, orientation);
     let fits = max_dim == 0 || (w <= max_dim && h <= max_dim);
     if fits {
-      // Verbatim copy; the caller rotates if needed.
-      write_file(output, &bytes)?;
+      // Verbatim copy; the caller applies the reported orientation.
+      write_file_atomic(output, &bytes)?;
       return Ok(PreviewOutcome {
-        orientation,
+        orientation: embedded_orientation,
         from_embedded: true,
         width: w,
         height: h,
       });
     }
-    match image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg) {
-      Ok(img) => return finish(img, true),
+    match decode_jpeg_limited(&bytes) {
+      Ok(img) => return finish(img, true, embedded_orientation),
       Err(e) => log::warn!("Embedded JPEG could not be decoded ({e}), trying other previews"),
     }
   }
@@ -680,7 +787,7 @@ fn extract_preview_inner(input: &Path, output: &Path, max_dim: u32) -> Result<Pr
     ("thumbnail_image", opened.decoder.thumbnail_image(&opened.source, &opened.params)),
   ] {
     match img {
-      Ok(Some(img)) if img.width() > 0 && img.height() > 0 => return finish(img, true),
+      Ok(Some(img)) if img.width() > 0 && img.height() > 0 => return finish(img, true, orientation),
       Ok(_) => {}
       Err(e) => log::debug!("{name} failed: {e}"),
     }
@@ -688,13 +795,16 @@ fn extract_preview_inner(input: &Path, output: &Path, max_dim: u32) -> Result<Pr
 
   // 3. Last resort: develop the sensor data.
   log::info!("No embedded preview in {}, developing sensor data", input.display());
+  if let Some((_, (w, h))) = sensor_dimensions(&opened) {
+    check_render_budget(w, h)?;
+  }
   let raw = opened.raw_image(false)?;
-  let img = render_upright(&raw, Brightness::Auto(0.01))?; // already upright
+  let img = render_upright(&raw, Brightness::Auto(0.01), effective_orientation(&md, &raw))?; // already upright
   let img = fit_within(img, max_dim);
   let rgb = img.into_rgb8();
   let (w, h) = rgb.dimensions();
   let bytes = encode_jpeg(&rgb, &encode_opts, None)?;
-  write_file(output, &bytes)?;
+  write_file_atomic(output, &bytes)?;
   Ok(PreviewOutcome {
     orientation: 1,
     from_embedded: false,
@@ -777,6 +887,61 @@ mod tests {
   }
 
   #[test]
+  fn auto_bright_pixels_matches_channel_version() {
+    let px: Vec<[f32; 3]> = (0..3000).map(|i| [i as f32 / 6000.0, i as f32 / 9000.0, i as f32 / 12000.0]).collect();
+    let r: Vec<f32> = px.iter().map(|p| p[0]).collect();
+    let g: Vec<f32> = px.iter().map(|p| p[1]).collect();
+    let b: Vec<f32> = px.iter().map(|p| p[2]).collect();
+    let a = auto_bright_gain([r.as_slice(), g.as_slice(), b.as_slice()].into_iter(), 0.01);
+    let bgain = auto_bright_gain_pixels(&px, 0.01);
+    assert!((a - bgain).abs() < 1e-6, "{a} vs {bgain}");
+    assert!((a - 2.0).abs() < 0.1, "{a}");
+    // NaN / inf do not panic or poison the gain
+    let weird = [[f32::NAN, f32::INFINITY, 0.5f32]; 100];
+    let g2 = auto_bright_gain_pixels(&weird, 0.01);
+    assert!(g2.is_finite() && (1.0..=16.0).contains(&g2));
+  }
+
+  #[test]
+  fn render_budget() {
+    assert!(check_render_budget(6000, 4000).is_ok());
+    assert!(check_render_budget(14204, 10652).is_ok()); // Phase One IQ4 150MP (151 MP)
+    assert!(check_render_budget(40000, 12000).is_err());
+    assert!(check_render_budget(0, 100).is_err());
+    assert!(check_render_budget(usize::MAX, 2).is_err());
+  }
+
+  #[test]
+  fn atomic_write_keeps_old_file_on_failure() {
+    let dir = std::env::temp_dir().join(format!("dnglab-ffi-atomic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("out.jpg");
+    write_file_atomic(&out, b"first").unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"first");
+    write_file_atomic(&out, b"second").unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"second");
+    assert!(!temp_path_for(&out).exists());
+    // A path whose parent does not exist fails without touching anything else
+    assert!(write_file_atomic(&dir.join("missing").join("x.jpg"), b"x").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn embedded_orientation_rules() {
+    assert_eq!(embedded_jpeg_orientation(&[0xFF, 0xD8, 0xFF, 0xD9], 6), 6);
+    // Out-of-range orientation in the embedded EXIF is ignored
+    let mut tiff = b"II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+    tiff.extend_from_slice(&[99, 0, 0, 0, 0, 0, 0, 0]);
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    let payload_len = 2 + 6 + tiff.len();
+    jpeg.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    jpeg.extend_from_slice(b"Exif\0\0");
+    jpeg.extend_from_slice(&tiff);
+    jpeg.extend_from_slice(&[0xFF, 0xD9]);
+    assert_eq!(embedded_jpeg_orientation(&jpeg, 8), 8);
+  }
+
+  #[test]
   fn fit_within_limits_longest_edge() {
     let img = DynamicImage::new_rgb8(400, 200);
     assert_eq!(fit_within(img.clone(), 0).dimensions(), (400, 200));
@@ -801,7 +966,7 @@ mod tests {
     let bytes = encode_jpeg(&rgb, &opts, Some(&payload)).unwrap();
     assert_eq!(exif_jpeg::jpeg_dimensions(&bytes), (16, 8));
     assert_eq!(bytes.windows(6).filter(|w| *w == b"Exif\0\0").count(), 1);
-    let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+    let decoded = decode_jpeg_limited(&bytes).unwrap();
     assert_eq!(decoded.dimensions(), (16, 8));
   }
 

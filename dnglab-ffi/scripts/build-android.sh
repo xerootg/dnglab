@@ -80,7 +80,13 @@ echo "dnglab-ffi: $CARGO_BIN ${ARGS[*]} (linker: $CLANG)" >&2
 "$CARGO_BIN" "${ARGS[@]}"
 
 if [[ -z "$TARGET_DIR" ]]; then
-  TARGET_DIR="$("$CARGO_BIN" metadata --manifest-path "$MANIFEST" --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+  # Default cargo target directory of the workspace that owns the manifest
+  # (honours CARGO_TARGET_DIR like cargo itself does).
+  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+    TARGET_DIR="$CARGO_TARGET_DIR"
+  else
+    TARGET_DIR="$(cd "$(dirname "$MANIFEST")/.." && pwd)/target"
+  fi
 fi
 OUT="${TARGET_DIR}/${TRIPLE}/${PROFILE}/libdnglab_ffi.a"
 [[ -f "$OUT" ]] || { echo "expected output missing: $OUT" >&2; exit 1; }

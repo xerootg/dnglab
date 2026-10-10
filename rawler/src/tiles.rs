@@ -283,7 +283,7 @@ where
     // Calculating the next line offset is easy - each tile has same width/height,
     // so the distance is simply the full width of the image.
     let next_line_distance = self.tile.width * self.tile.cpp;
-    let line_ptr = unsafe { (self.tile.first_line as *mut T).offset((self.current_line * next_line_distance) as isize) };
+    let line_ptr = unsafe { (self.tile.first_line as *mut T).add(self.current_line * next_line_distance) };
     self.current_line += 1;
 
     // This is safe because we check in the constructor if the line_ptr
