@@ -38,8 +38,16 @@ impl Bilinear4Channel {
     let plane_map = colors.plane_lookup_table();
     let ch = |row: usize, col: usize| -> usize { plane_map[cfa.color_at(row, col)] };
 
+    assert!(
+      roi.p.x.saturating_add(roi.width()) <= pixels.width && roi.p.y.saturating_add(roi.height()) <= pixels.height,
+      "Bilinear demosaic ROI {:?} is outside of the {}x{} input",
+      roi,
+      pixels.width,
+      pixels.height
+    );
     let pixels = pixels.crop(roi);
     let dim = pixels.dim();
+    assert!(dim.w >= 2 && dim.h >= 2, "Bilinear demosaic needs a region of at least 2x2 pixels, got {}x{}", dim.w, dim.h);
     let mut out = Color2D::new(pixels.dim().w, pixels.dim().h);
 
     // Process edges

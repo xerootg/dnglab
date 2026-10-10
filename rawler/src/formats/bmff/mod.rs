@@ -82,17 +82,41 @@ impl BoxHeader {
     }
 
     let current = reader.stream_position()?;
+    let header_len = current - start;
+
+    // Validate the declared size against the stream so that no box can
+    // claim to be smaller than its own header (which would make container
+    // loops spin in place) or to extend past the end of the file.
+    let stream_len = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(current))?;
+    if size == 0 {
+      // ISO BMFF: a size of zero means "box extends to the end of the file".
+      size = stream_len.saturating_sub(start);
+    }
+    if size < header_len {
+      return Err(BmffError::Parse(format!(
+        "BMFF box '{:?}' at offset {} declares size {} which is smaller than its header ({} bytes)",
+        typ, start, size, header_len
+      )));
+    }
+    if start.checked_add(size).map(|end| end > stream_len).unwrap_or(true) {
+      return Err(BmffError::Parse(format!(
+        "BMFF box '{:?}' at offset {} declares size {} which extends past the end of the file ({} bytes)",
+        typ, start, size, stream_len
+      )));
+    }
+
     Ok(BoxHeader {
       size,
       typ,
       uuid,
       offset: start,
-      header_len: current - start,
+      header_len,
     })
   }
 
   pub fn end_offset(&self) -> u64 {
-    self.offset + self.size
+    self.offset.saturating_add(self.size)
   }
 
   pub fn make_view<'a>(&self, buffer: &'a [u8], skip: usize, limit: usize) -> &'a [u8] {
@@ -323,5 +347,42 @@ impl Bmff {
 
   pub fn compatible_brand(&self, _brand: &str) -> bool {
     true // FIXME
+  }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+  use super::*;
+
+  #[test]
+  fn box_smaller_than_header_is_rejected() {
+    let buf = [0, 0, 0, 4, b'f', b't', b'y', b'p', 0, 0, 0, 0];
+    assert!(BoxHeader::parse(Cursor::new(&buf[..])).is_err());
+  }
+
+  #[test]
+  fn box_past_end_of_file_is_rejected() {
+    let buf = [0, 0, 0x10, 0, b'f', b't', b'y', b'p'];
+    assert!(BoxHeader::parse(Cursor::new(&buf[..])).is_err());
+  }
+
+  #[test]
+  fn zero_size_box_extends_to_end_of_file() {
+    let buf = [0, 0, 0, 0, b'm', b'd', b'a', b't', 1, 2, 3, 4, 5, 6, 7, 8];
+    let header = BoxHeader::parse(Cursor::new(&buf[..])).expect("valid header");
+    assert_eq!(header.size, 16);
+    assert_eq!(header.end_offset(), 16);
+    assert_eq!(header.header_len, 8);
+  }
+
+  #[test]
+  fn end_offset_does_not_overflow() {
+    let header = BoxHeader {
+      size: u64::MAX,
+      offset: 16,
+      header_len: 8,
+      ..Default::default()
+    };
+    assert_eq!(header.end_offset(), u64::MAX);
   }
 }

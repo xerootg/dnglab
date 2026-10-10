@@ -106,6 +106,16 @@ impl Entry {
     }
 
     reader.goto(base + offset)?;
+    // Never allocate for more data than the stream can provide: count is a
+    // 32 bit value under file control and would otherwise drive a multi-GB
+    // allocation (and abort) for a 12 byte entry.
+    let available = reader.remaining()?;
+    if bytesize as u64 > available {
+      return Err(TiffError::Overflow(format!(
+        "Tag 0x{:X} claims {} bytes of data but only {} bytes remain in the stream",
+        tag, bytesize, available
+      )));
+    }
     let entry = match typ {
       TYPE_BYTE => {
         let mut v = vec![0; count as usize];

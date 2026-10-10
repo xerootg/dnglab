@@ -159,9 +159,16 @@ pub trait TiffReader {
     let reader = reader.into_inner();
 
     next_ifd = apply_corr(next_ifd, self.file().corr);
+    let max_chained = max_chained.unwrap_or(super::MAX_IFD_CHAIN).max(1);
     let mut chain = Vec::new();
+    let mut visited = std::collections::HashSet::new();
     while next_ifd != 0 {
-      // TODO: check if offset is in range
+      // A cyclic IFD chain (next pointing to itself or an earlier IFD) must
+      // not loop forever.
+      if !visited.insert(next_ifd) {
+        log::warn!("TIFF: IFD chain loops back to offset {}, stopping", next_ifd);
+        break;
+      }
       let mut multi_sub_tags = self.wellknown_sub_ifd_tags();
       multi_sub_tags.extend_from_slice(sub_tags);
       let ifd = IFD::new(reader, next_ifd, self.file().base, self.file().corr, endian, &multi_sub_tags)?;
@@ -170,10 +177,8 @@ pub trait TiffReader {
       }
       next_ifd = ifd.next_ifd;
       chain.push(ifd);
-      if let Some(max) = max_chained {
-        if chain.len() > max {
-          break;
-        }
+      if chain.len() >= max_chained {
+        break;
       }
     }
 
@@ -285,6 +290,14 @@ impl<'a, R: Read + Seek + 'a> EndianReader<'a, R> {
   }
 
   // TODO: try_from?
+
+  /// Number of bytes between the current position and the end of the stream.
+  pub fn remaining(&mut self) -> Result<u64> {
+    let pos = self.inner.stream_position()?;
+    let end = self.inner.seek(SeekFrom::End(0))?;
+    self.inner.seek(SeekFrom::Start(pos))?;
+    Ok(end.saturating_sub(pos))
+  }
 
   pub fn goto(&mut self, offset: u32) -> Result<()> {
     self.inner.seek(SeekFrom::Start(offset as u64))?;
@@ -424,5 +437,42 @@ impl<'a, R: Read + Seek + 'a> ReadByteOrder for EndianReader<'a, R> {
       Endian::Little => self.inner.read_f64_into::<LittleEndian>(dst),
       Endian::Big => self.inner.read_f64_into::<BigEndian>(dst),
     }
+  }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+  use super::*;
+
+  /// Little-endian TIFF with one IFD at offset 8 holding a single entry.
+  fn tiff_with_entry(typ: u16, count: u32, value_or_offset: u32, next_ifd: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // entry count
+    buf.extend_from_slice(&0x0100u16.to_le_bytes()); // ImageWidth
+    buf.extend_from_slice(&typ.to_le_bytes());
+    buf.extend_from_slice(&count.to_le_bytes());
+    buf.extend_from_slice(&value_or_offset.to_le_bytes());
+    buf.extend_from_slice(&next_ifd.to_le_bytes());
+    buf
+  }
+
+  #[test]
+  fn cyclic_ifd_chain_terminates() {
+    // next_ifd points back at the IFD itself.
+    let buf = tiff_with_entry(3, 1, 1, 8);
+    let tiff = GenericTiffReader::new_with_buffer(&buf, 0, 0, None).expect("cyclic chain must still parse");
+    assert_eq!(tiff.chains().len(), 1);
+  }
+
+  #[test]
+  fn entry_count_beyond_stream_is_rejected_without_allocation() {
+    // 0xFFFFFFFF DOUBLE values would be 32 GiB; must fail instead of aborting.
+    let buf = tiff_with_entry(12, u32::MAX, 8, 0);
+    let result = GenericTiffReader::new_with_buffer(&buf, 0, 0, None);
+    // Either the entry is skipped (IFD then empty -> error) or the reader fails cleanly.
+    assert!(result.is_err() || result.unwrap().root_ifd().get_entry(crate::tags::TiffCommonTag::ImageWidth).is_none());
   }
 }

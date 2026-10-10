@@ -908,6 +908,11 @@ impl<'a> IiqDecoder<'a> {
 
   fn fix_bad_column(&self, img: &mut PixU16, defect: &Defect) {
     let col = defect.col;
+    // The kernels below reach two pixels in every direction.
+    if col < 2 || col + 2 >= img.width || img.height < 5 {
+      log::warn!("IIQ: ignoring bad column {} outside of the correctable area of a {}x{} image", col, img.width, img.height);
+      return;
+    }
     for row in 2..img.height - 2 {
       match self.camera.cfa.color_at(row, col) {
         cfa::CFA_COLOR_G => {

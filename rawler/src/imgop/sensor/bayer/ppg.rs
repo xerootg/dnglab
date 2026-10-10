@@ -41,6 +41,21 @@ impl Demosaic<f32, 3> for PPGDemosaic {
     if !cfa.is_rgb() {
       panic!("CFA pattern '{}' is not a RGB pattern, can not demosaic with PPG", cfa);
     }
+    // The interpolation kernels look up to 3 pixels in each direction and
+    // the ROI must lie inside the input.
+    assert!(
+      roi.width() >= 8 && roi.height() >= 8,
+      "PPG demosaic needs a region of at least 8x8 pixels, got {}x{}",
+      roi.width(),
+      roi.height()
+    );
+    assert!(
+      roi.p.x.saturating_add(roi.width()) <= pixels.width && roi.p.y.saturating_add(roi.height()) <= pixels.height,
+      "PPG demosaic ROI {:?} is outside of the {}x{} input",
+      roi,
+      pixels.width,
+      pixels.height
+    );
     // Measure time
     let now = Instant::now();
 
@@ -119,8 +134,8 @@ fn interpolate_green(img: &mut RgbF32, shifted: &CFA) {
   // image. This is not possible in Rust without unsafe code.
   let dataptr = img.data_ptr();
 
-  img.pixels_mut().par_chunks_exact_mut(w).enumerate().skip(3).take(h - 6).for_each(|(row, buf)| {
-    for (col, pixel) in buf.iter_mut().enumerate().skip(3).take(w - 6) {
+  img.pixels_mut().par_chunks_exact_mut(w).enumerate().skip(3).take(h.saturating_sub(6)).for_each(|(row, buf)| {
+    for (col, pixel) in buf.iter_mut().enumerate().skip(3).take(w.saturating_sub(6)) {
       if shifted.color_at(row, col) != CFA_COLOR_G {
         let ch = shifted.color_at(row, col); // It's R or B
         let x = pixel[ch];
@@ -178,8 +193,8 @@ fn interpolate_rb_at_green(img: &mut RgbF32, shifted: &CFA) {
   // image. This is not possible in Rust without unsafe code.
   let dataptr = img.data_ptr();
 
-  img.pixels_mut().par_chunks_exact_mut(w).enumerate().skip(3).take(h - 6).for_each(|(row, buf)| {
-    for (col, pixel) in buf.iter_mut().enumerate().skip(3).take(w - 6) {
+  img.pixels_mut().par_chunks_exact_mut(w).enumerate().skip(3).take(h.saturating_sub(6)).for_each(|(row, buf)| {
+    for (col, pixel) in buf.iter_mut().enumerate().skip(3).take(w.saturating_sub(6)) {
       if shifted.color_at(row, col) == CFA_COLOR_G {
         let h_ch = shifted.color_at(row, col + 1); // horizontal corresponding channel
         let v_ch = shifted.color_at(row + 1, col); // vertical corresponding channel
@@ -215,8 +230,8 @@ fn interpolate_rb_at_non_green(img: &mut RgbF32, shifted: &CFA) {
   // image. This is not possible in Rust without unsafe code.
   let dataptr = img.data_ptr();
 
-  img.pixels_mut().par_chunks_exact_mut(w).enumerate().skip(3).take(h - 6).for_each(|(row, buf)| {
-    for (col, pixel) in buf.iter_mut().enumerate().skip(3).take(w - 6) {
+  img.pixels_mut().par_chunks_exact_mut(w).enumerate().skip(3).take(h.saturating_sub(6)).for_each(|(row, buf)| {
+    for (col, pixel) in buf.iter_mut().enumerate().skip(3).take(w.saturating_sub(6)) {
       if shifted.color_at(row, col) != CFA_COLOR_G {
         let x_ch = shifted.color_at(row, col); // current
         let y_ch = if x_ch == CFA_COLOR_R { CFA_COLOR_B } else { CFA_COLOR_R };

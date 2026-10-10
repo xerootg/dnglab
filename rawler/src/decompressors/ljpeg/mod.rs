@@ -33,6 +33,13 @@ impl<'a> Decompressor<'a, u16> for LJpegDecompressor {
   /// Returns `Err` if the LJPEG stream cannot be parsed or decoded.
   fn decompress(&self, src: &[u8], skip_rows: usize, lines: impl LineIteratorMut<'a, u16>, line_width: usize) -> std::result::Result<(), String> {
     let decompressor = LjpegDecompressor::new(src)?;
+    if decompressor.width() == 0 || decompressor.height() == 0 || decompressor.width() > 50_000 || decompressor.height() > 50_000 {
+      return Err(format!(
+        "LJPEG frame dimension {}x{} is not plausible",
+        decompressor.width(),
+        decompressor.height()
+      ));
+    }
     let mut pixbuf = PixU16::new(decompressor.width(), decompressor.height());
 
     decompressor.decode(pixbuf.pixels_mut(), 0, decompressor.width(), decompressor.width(), decompressor.height(), false)?;

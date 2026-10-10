@@ -55,7 +55,14 @@ impl<R: Read + Seek> ReadBox<&mut R> for MdiaBox {
         }
       }
 
-      current = reader.stream_position()?;
+      let next = reader.stream_position()?;
+      if next <= current {
+        return Err(crate::formats::bmff::BmffError::Parse(format!(
+          "BMFF child box at offset {} did not advance the stream, corrupt file?",
+          current
+        )));
+      }
+      current = next;
     }
 
     reader.seek(SeekFrom::Start(header.end_offset()))?;

@@ -73,8 +73,11 @@ where
     }
   }
 
+  /// Create a placeholder image with the given dimension but no pixel storage.
+  /// No memory is reserved: the dimension comes straight from the file and
+  /// must not drive an allocation before it has been validated.
   pub fn new_uninit(width: usize, height: usize) -> Self {
-    let data = Vec::with_capacity(width * height);
+    let data = Vec::new();
     Self {
       data,
       width,
@@ -151,30 +154,22 @@ where
     &mut self.data[start..start + self.width]
   }
 
+  /// Pixel access. Always bounds-checked: decoders derive coordinates from
+  /// untrusted file content, so an out-of-range access must panic (which the
+  /// decoder entry points turn into an error) instead of reading or writing
+  /// arbitrary memory.
   #[inline(always)]
   pub fn at(&self, row: usize, col: usize) -> &T {
     debug_assert!(self.initialized);
-    #[cfg(debug_assertions)]
-    {
-      &self.data[row * self.width + col]
-    }
-    #[cfg(not(debug_assertions))]
-    unsafe {
-      self.data.get_unchecked(row * self.width + col)
-    }
+    debug_assert!(col < self.width, "column {} out of range for width {}", col, self.width);
+    &self.data[row * self.width + col]
   }
 
   #[inline(always)]
   pub fn at_mut(&mut self, row: usize, col: usize) -> &mut T {
     debug_assert!(self.initialized);
-    #[cfg(debug_assertions)]
-    {
-      &mut self.data[row * self.width + col]
-    }
-    #[cfg(not(debug_assertions))]
-    unsafe {
-      self.data.get_unchecked_mut(row * self.width + col)
-    }
+    debug_assert!(col < self.width, "column {} out of range for width {}", col, self.width);
+    &mut self.data[row * self.width + col]
   }
 
   #[inline(always)]
@@ -421,28 +416,15 @@ where
     self.data.chunks_exact_mut(self.width)
   }
 
+  /// Pixel access, always bounds-checked (see [`Pix2D::at`]).
   #[inline(always)]
   pub fn at(&self, row: usize, col: usize) -> &[T; N] {
-    #[cfg(debug_assertions)]
-    {
-      &self.data[row * self.width + col]
-    }
-    #[cfg(not(debug_assertions))]
-    unsafe {
-      self.data.get_unchecked(row * self.width + col)
-    }
+    &self.data[row * self.width + col]
   }
 
   #[inline(always)]
   pub fn at_mut(&mut self, row: usize, col: usize) -> &mut [T; N] {
-    #[cfg(debug_assertions)]
-    {
-      &mut self.data[row * self.width + col]
-    }
-    #[cfg(not(debug_assertions))]
-    unsafe {
-      self.data.get_unchecked_mut(row * self.width + col)
-    }
+    &mut self.data[row * self.width + col]
   }
 
   #[inline(always)]
@@ -579,13 +561,14 @@ where
 
   /// Get a pixel from raw pointer
   /// # Safety
-  /// TODO
+  /// The pointer must still refer to the live `Color2D` this view was created
+  /// from, and no `&mut` to the same pixel may be alive. The coordinates are
+  /// checked: an out-of-range access panics instead of dereferencing outside
+  /// the pixel buffer.
   #[inline(always)]
   pub unsafe fn at(&self, row: usize, col: usize) -> &[T; N] {
-    unsafe {
-      debug_assert!(row * col < self.height * self.width);
-      &*self.ptr.add(row * self.width + col)
-    }
+    assert!(row < self.height && col < self.width, "pixel ({}, {}) out of range for {}x{}", row, col, self.width, self.height);
+    unsafe { &*self.ptr.add(row * self.width + col) }
   }
 }
 
@@ -664,4 +647,31 @@ macro_rules! alloc_image_typed_ok {
       $crate::alloc_image_plain_typed!($T, $width, $height, $dummy)
     }
   }};
+}
+
+#[cfg(test)]
+mod hardening_tests {
+  use super::*;
+
+  #[test]
+  #[should_panic]
+  fn pix2d_at_is_bounds_checked() {
+    let img = PixU16::new(4, 4);
+    let _ = img.at(4, 0);
+  }
+
+  #[test]
+  #[should_panic]
+  fn color2d_ptr_at_is_bounds_checked() {
+    let img = Color2D::<f32, 3>::new(4, 4);
+    let ptr = img.data_ptr();
+    let _ = unsafe { ptr.at(3, 4) };
+  }
+
+  #[test]
+  fn new_uninit_reserves_nothing() {
+    let img = PixU16::new_uninit(usize::MAX / 4, 2);
+    assert!(!img.is_initialized());
+    assert_eq!(img.len(), 0);
+  }
 }

@@ -143,6 +143,23 @@ impl CodecParams {
       return Err(CrxError::General(format!("Plane configration {} is not supported", cmp1.n_planes)));
     }
 
+    // Frame and tile geometry comes from the CMP1 box; bound it before it
+    // drives any allocation (the CFA output buffer alone is f_width*f_height).
+    const MAX_EDGE: u32 = 0x7FFF;
+    const MAX_PIXELS: u64 = 400_000_000;
+    if cmp1.f_width == 0 || cmp1.f_height == 0 || cmp1.f_width > MAX_EDGE || cmp1.f_height > MAX_EDGE {
+      return Err(CrxError::General(format!("Frame dimension {}x{} is not supported", cmp1.f_width, cmp1.f_height)));
+    }
+    if cmp1.f_width as u64 * cmp1.f_height as u64 > MAX_PIXELS {
+      return Err(CrxError::General(format!("Frame dimension {}x{} is not plausible", cmp1.f_width, cmp1.f_height)));
+    }
+    if cmp1.tile_width == 0 || cmp1.tile_height == 0 || cmp1.tile_width > MAX_EDGE || cmp1.tile_height > MAX_EDGE {
+      return Err(CrxError::General(format!("Tile dimension {}x{} is not supported", cmp1.tile_width, cmp1.tile_height)));
+    }
+    if cmp1.image_levels > 3 {
+      return Err(CrxError::General(format!("Image level count {} is not supported", cmp1.image_levels)));
+    }
+
     //let tile_cols: usize = (cmp1.f_width / cmp1.tile_width) as usize;
     //let tile_rows: usize = (cmp1.f_height / cmp1.tile_height) as usize;
 

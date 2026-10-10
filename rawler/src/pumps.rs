@@ -398,9 +398,16 @@ impl<'a> ByteStream<'a> {
 
   #[inline(always)]
   pub fn get_bytes(&mut self, n: usize) -> Vec<u8> {
-    let mut val = Vec::with_capacity(n);
-    val.extend_from_slice(&self.buffer[self.pos..self.pos + n]);
-    self.pos += n;
+    // Check the range before reserving: `n` usually comes straight from the
+    // file and an unchecked `with_capacity` aborts on a huge value instead of
+    // panicking (which callers can recover from).
+    let end = self
+      .pos
+      .checked_add(n)
+      .filter(|end| *end <= self.buffer.len())
+      .unwrap_or_else(|| panic!("ByteStream: read of {} bytes at {} exceeds buffer of {} bytes", n, self.pos, self.buffer.len()));
+    let val = self.buffer[self.pos..end].to_vec();
+    self.pos = end;
     val
   }
 
@@ -480,5 +487,27 @@ impl<'a> BitPump for BitPumpReverseBitsMSB<'a> {
   fn consume_bits(&mut self, num: u32) {
     self.nbits -= num;
     self.bits &= (1 << self.nbits) - 1;
+  }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+  use super::*;
+
+  #[test]
+  #[should_panic(expected = "exceeds buffer")]
+  fn byte_stream_get_bytes_panics_instead_of_reserving() {
+    let data = [1u8, 2, 3, 4];
+    let mut bs = ByteStream::new(&data, Endian::Little);
+    bs.get_u16();
+    let _ = bs.get_bytes(usize::MAX - 1);
+  }
+
+  #[test]
+  fn byte_stream_get_bytes_in_range() {
+    let data = [1u8, 2, 3, 4];
+    let mut bs = ByteStream::new(&data, Endian::Little);
+    assert_eq!(bs.get_bytes(3), vec![1, 2, 3]);
+    assert_eq!(bs.remaining_bytes(), 1);
   }
 }
