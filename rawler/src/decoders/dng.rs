@@ -100,6 +100,41 @@ impl<'a> Decoder for DngDecoder<'a> {
     }
   }
 
+  /// Largest JPEG compressed preview sub-IFD stored as a single strip (the
+  /// layout DNGLab and Adobe DNG Converter write), returned verbatim.
+  fn preview_jpeg(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if params.image_index != 0 {
+      return Ok(None);
+    }
+    let Some(sub_ifds) = self.tiff.root_ifd().get_sub_ifd_all(TiffCommonTag::SubIFDs) else {
+      return Ok(None);
+    };
+    let mut best: Option<(&IFD, u32, u32)> = None;
+    for ifd in sub_ifds.iter() {
+      let is_preview = ifd.get_entry(TiffCommonTag::NewSubFileType).map(|e| e.force_u32(0)) == Some(1);
+      let is_jpeg = ifd.get_entry(TiffCommonTag::Compression).map(|e| e.force_u16(0)) == Some(7);
+      let bits = ifd.get_entry(TiffCommonTag::BitsPerSample).map(|e| e.force_u16(0)).unwrap_or(0);
+      if !(is_preview && is_jpeg && bits == 8 && ifd.contains_singlestrip_image()) {
+        continue;
+      }
+      let w = ifd.get_entry(TiffCommonTag::ImageWidth).map(|e| e.force_u32(0)).unwrap_or(0);
+      let h = ifd.get_entry(TiffCommonTag::ImageLength).map(|e| e.force_u32(0)).unwrap_or(0);
+      if w == 0 || h == 0 {
+        continue;
+      }
+      if best.map(|(_, bw, bh)| w as u64 * h as u64 > bw as u64 * bh as u64).unwrap_or(true) {
+        best = Some((ifd, w, h));
+      }
+    }
+    if let Some((ifd, w, h)) = best {
+      let buf = ifd.singlestrip_data_rawsource(file)?;
+      if buf.len() >= 4 && buf[0] == 0xFF && buf[1] == 0xD8 {
+        return Ok(Some((buf.to_vec(), w, h)));
+      }
+    }
+    Ok(None)
+  }
+
   fn preview_image(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
     if params.image_index != 0 {
       return Ok(None);

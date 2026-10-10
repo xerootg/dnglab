@@ -222,6 +222,24 @@ impl<'a> Decoder for ArwDecoder<'a> {
   /// Exiftool docs says there is a tag 0x2002 including the image, but this tag
   /// exists in none of the samples?! Instead, we can use the JPEG thumbnail
   /// tags which exists for most samples.
+  /// Same JPEG as `preview_image`, without decoding.
+  fn preview_jpeg(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if params.image_index != 0 {
+      return Ok(None);
+    }
+    let root = self.tiff.root_ifd();
+    if let (Some(preview_off), Some(preview_len)) = (root.get_entry(ExifTag::JPEGInterchangeFormat), root.get_entry(ExifTag::JPEGInterchangeFormatLength)) {
+      let buf = file.subview(preview_off.force_u64(0), preview_len.force_u64(0))?;
+      if buf.len() >= 4 && buf[0] == 0xFF && buf[1] == 0xD8 {
+        let (width, height) = super::jpeg_dimensions(buf);
+        if width > 0 && height > 0 {
+          return Ok(Some((buf.to_vec(), width, height)));
+        }
+      }
+    }
+    Ok(None)
+  }
+
   fn preview_image(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
     if params.image_index != 0 {
       return Ok(None);

@@ -1,0 +1,30 @@
+[package]
+name = "dnglab-ffi"
+version = "0.7.2"
+edition = "2024"
+rust-version = "1.88"
+description = "C ABI for dnglab/rawler: RAW to DNG, RAW to JPEG (embedded or rendered), previews and metadata for embedding in native apps"
+license = "LGPL-2.1"
+repository = "https://github.com/dnglab/dnglab"
+publish = false
+
+[lib]
+name = "dnglab_ffi"
+# staticlib: linked into the Android JNI library (libraw2dng.so)
+# cdylib:    stand-alone shared library for other hosts
+# rlib:      lets the examples/tests use the safe Rust API directly
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+rawler = { path = "../rawler" }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+jpeg-encoder = "0.7"
+serde_json = "1"
+chrono = "0.4"
+log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15"
+
+[dev-dependencies]
+env_logger = "0.11"

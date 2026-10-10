@@ -416,6 +416,37 @@ impl<'a> Decoder for Cr3Decoder<'a> {
     Ok(img)
   }
 
+  /// Full resolution camera JPEG from track 0, verbatim. HDR-PQ files carry
+  /// HEIF there instead; those return `None`.
+  fn preview_jpeg(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if params.image_index != 0 || rawler_ignore_previews() {
+      return Ok(None);
+    }
+    let trak = match self.bmff.filebox.moov.traks.first() {
+      Some(trak) => trak,
+      None => return Ok(None),
+    };
+    let offset = match trak.mdia.minf.stbl.co64.as_ref().and_then(|co64| co64.entries.first()) {
+      Some(offset) => *offset as u64,
+      None => return Ok(None),
+    };
+    let size = match trak.mdia.minf.stbl.stsz.sample_sizes.first() {
+      Some(size) => *size as u64,
+      None => return Ok(None),
+    };
+    let buf = file
+      .subview(offset, size)
+      .map_err(|e| RawlerError::with_io_error("CR3: failed to read full image data", file.path(), e))?;
+    if buf.len() < 4 || buf[0] != 0xFF || buf[1] != 0xD8 {
+      return Ok(None);
+    }
+    let (width, height) = super::jpeg_dimensions(buf);
+    if width == 0 || height == 0 {
+      return Ok(None);
+    }
+    Ok(Some((buf.to_vec(), width, height)))
+  }
+
   /// Extract preview image embedded in CR3
   fn preview_image(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
     if params.image_index != 0 {
