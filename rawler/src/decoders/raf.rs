@@ -472,6 +472,22 @@ impl<'a> Decoder for RafDecoder<'a> {
     }
   }
 
+  /// The RAF header points at the camera JPEG; return it without decoding.
+  fn preview_jpeg(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if params.image_index != 0 {
+      return Ok(None);
+    }
+    let jpeg_buf = self.read_embedded_jpeg(file)?;
+    if jpeg_buf.len() < 4 || jpeg_buf[0] != 0xFF || jpeg_buf[1] != 0xD8 {
+      return Ok(None);
+    }
+    let (width, height) = super::jpeg_dimensions(jpeg_buf);
+    if width == 0 || height == 0 {
+      return Ok(None);
+    }
+    Ok(Some((jpeg_buf.to_vec(), width, height)))
+  }
+
   fn preview_image(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
     if params.image_index != 0 {
       return Ok(None);

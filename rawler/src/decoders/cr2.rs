@@ -302,6 +302,38 @@ impl<'a> Decoder for Cr2Decoder<'a> {
     Ok(self.xpacket.clone())
   }
 
+  /// CR2 IFD0 carries the full resolution camera JPEG (old-style JPEG
+  /// compression = 6, a plain JFIF stream). Hand it out without decoding.
+  fn preview_jpeg(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if params.image_index != 0 {
+      return Ok(None);
+    }
+    let root_ifd = &self.tiff.root_ifd();
+    if !root_ifd.contains_singlestrip_image() {
+      return Ok(None);
+    }
+    let compression = root_ifd.get_entry(TiffCommonTag::Compression).map(|e| e.force_usize(0)).unwrap_or(0);
+    if compression == 1 {
+      // Uncompressed RGB strip, not a JPEG.
+      return Ok(None);
+    }
+    let buf = root_ifd
+      .singlestrip_data_rawsource(file)
+      .map_err(|e| RawlerError::DecoderFailed(format!("Failed to get strip data: {}", e)))?;
+    if buf.len() < 4 || buf[0] != 0xFF || buf[1] != 0xD8 {
+      return Ok(None);
+    }
+    let (mut width, mut height) = super::jpeg_dimensions(buf);
+    if width == 0 || height == 0 {
+      width = root_ifd.get_entry(TiffCommonTag::ImageWidth).map(|e| e.force_u32(0)).unwrap_or(0);
+      height = root_ifd.get_entry(TiffCommonTag::ImageLength).map(|e| e.force_u32(0)).unwrap_or(0);
+    }
+    if width == 0 || height == 0 {
+      return Ok(None);
+    }
+    Ok(Some((buf.to_vec(), width, height)))
+  }
+
   fn preview_image(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
     if params.image_index != 0 {
       return Ok(None);

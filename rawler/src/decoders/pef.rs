@@ -134,6 +134,32 @@ impl<'a> Decoder for PefDecoder<'a> {
     Ok(RawImage::new(self.camera.clone(), image, cpp, wb, photometric, blacklevel, whitelevel, dummy))
   }
 
+  /// Pentax stores the camera JPEG via MakerNote PreviewImageStart/Length.
+  /// Returned verbatim; `preview_image` additionally trims the black borders
+  /// the MakerNote describes, which is not possible without re-encoding.
+  fn preview_jpeg(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    if params.image_index != 0 {
+      return Ok(None);
+    }
+    let length = self.makernote.get_entry(PefMakernote::PreviewImageLength).map(|e| e.force_u32(0)).unwrap_or(0);
+    let offset = self.makernote.get_entry(PefMakernote::PreviewImageStart).map(|e| e.force_u32(0)).unwrap_or(0);
+    if length == 0 || offset == 0 {
+      return Ok(None);
+    }
+    // Offsets are relative to the MakerNote on most bodies, absolute on some.
+    for abs in [(self.makernote_offset as u64).saturating_add(offset as u64), offset as u64] {
+      if let Ok(buf) = file.subview(abs, length as u64) {
+        if buf.len() >= 4 && buf[0] == 0xFF && buf[1] == 0xD8 {
+          let (width, height) = super::jpeg_dimensions(buf);
+          if width > 0 && height > 0 {
+            return Ok(Some((buf.to_vec(), width, height)));
+          }
+        }
+      }
+    }
+    Ok(None)
+  }
+
   fn preview_image(&self, file: &RawSource, params: &RawDecodeParams) -> Result<Option<DynamicImage>> {
     if params.image_index != 0 {
       return Ok(None);

@@ -4,6 +4,7 @@ members = [
 	"rawler",
 	"embedftp",
 	"dnglab-py",
+	"dnglab-ffi",
 ]
 resolver = "2"
 
@@ -20,3 +21,9 @@ overflow-checks = false
 debug = 0
 #lto = "fat"
 
+# Profile for the dnglab-ffi static library embedded in mobile apps:
+# release speed, smaller binaries (thin LTO, no debug info).
+[profile.android]
+inherits = "release"
+lto = "thin"
+strip = "debuginfo"
