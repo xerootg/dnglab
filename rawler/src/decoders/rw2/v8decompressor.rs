@@ -9,7 +9,7 @@ use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
-  alloc_image_ok,
+  RawlerError, alloc_image_ok,
   bits::{Endian, clamp},
   decoders::{Result, rw2::PanasonicTag},
   formats::tiff::IFD,
@@ -371,15 +371,46 @@ pub(crate) fn decode_panasonic_v8(rawfile: &RawSource, width: usize, height: usi
   let params = CF2Params::new(ifd)?;
   log::debug!("pana8: params: {:?}", params);
 
-  assert_eq!(
-    params.strip_widths.iter().map(|x| *x as i32).sum::<i32>() as usize / params.num_of_strips_v as usize,
-    width
-  );
+  let total_strip_count = params.num_of_strips_h as usize * params.num_of_strips_v as usize;
+  if total_strip_count == 0 {
+    return Err(RawlerError::DecoderFailed("pana8: strip count is zero".into()));
+  }
+  if params.strip_byte_offsets.len() < total_strip_count
+    || params.strip_data_size.len() < total_strip_count
+    || params.strip_widths.len() < total_strip_count
+    || params.strip_heights.len() < total_strip_count
+    || params.strip_line_offsets.len() < total_strip_count
+  {
+    return Err(RawlerError::DecoderFailed(format!(
+      "pana8: strip tables are shorter than the {} strips declared",
+      total_strip_count
+    )));
+  }
+  // Every strip must land completely inside the output image, and strips
+  // are decoded two rows / two columns at a time.
+  for strip_id in 0..total_strip_count {
+    let w = params.strip_widths[strip_id] as usize;
+    let h = params.strip_heights[strip_id] as usize;
+    let cols = params.strip_line_offsets[strip_id].cols as usize;
+    let rows = params.strip_line_offsets[strip_id].rows as usize;
+    if w == 0 || h == 0 || !w.is_multiple_of(2) || !h.is_multiple_of(2) || cols + w > width || rows + h > height {
+      return Err(RawlerError::DecoderFailed(format!(
+        "pana8: strip {} ({}x{} at {}:{}) does not fit into a {}x{} image",
+        strip_id, w, h, cols, rows, width, height
+      )));
+    }
+  }
+  let width_sum: usize = params.strip_widths.iter().take(total_strip_count).map(|x| *x as usize).sum();
+  if width_sum / params.num_of_strips_v as usize != width {
+    return Err(RawlerError::DecoderFailed(format!(
+      "pana8: strip widths sum to {} over {} vertical strips, expected image width {}",
+      width_sum, params.num_of_strips_v, width
+    )));
+  }
 
   // Shared output buffer, we need to write from multiple rayon threads to output image.
   let shared_pix = SharedPix2D::new(out);
 
-  let total_strip_count = (params.num_of_strips_h * params.num_of_strips_v) as usize;
   let mut bitstreams = Vec::with_capacity(total_strip_count);
   for strip_id in 0..total_strip_count {
     bitstreams.push(rawfile.subview(params.strip_byte_offsets[strip_id] as u64, (params.strip_data_size[strip_id] as u64 + 7) / 8)?);

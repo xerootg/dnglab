@@ -23,8 +23,8 @@ pub mod error;
 pub mod exif_jpeg;
 pub mod metadata;
 
-use std::ffi::{CStr, CString, c_char};
-use std::path::{Path, PathBuf};
+use std::ffi::{CStr, CString, OsString, c_char};
+use std::path::PathBuf;
 use std::ptr;
 
 use crate::api::{ChromaSubsampling, DngOptions, EmbeddedJpegPolicy, JpegOptions};
@@ -112,15 +112,56 @@ pub struct dnglab_preview_result {
 // helpers
 // ---------------------------------------------------------------------------
 
-unsafe fn cstr_arg(p: *const c_char, name: &str) -> Result<String> {
-  if p.is_null() {
-    return Err(Error::new(format!("{name} must not be NULL")));
-  }
-  // SAFETY: caller guarantees a NUL terminated string.
-  let s = unsafe { CStr::from_ptr(p) };
-  s.to_str().map(|s| s.to_string()).map_err(|_| Error::new(format!("{name} is not valid UTF-8")))
+/// Marker for argument errors so the C return code can be chosen without
+/// inspecting message text.
+const ARG_ERROR_PREFIX: &str = "invalid argument: ";
+
+fn arg_error(msg: impl std::fmt::Display) -> Error {
+  Error::new(format!("{ARG_ERROR_PREFIX}{msg}"))
 }
 
+/// Convert a C string to a path. On Unix (Android included) paths are
+/// arbitrary bytes, so no UTF-8 validation is applied; elsewhere UTF-8 is
+/// required.
+fn bytes_to_path(bytes: &[u8], name: &str) -> Result<PathBuf> {
+  #[cfg(unix)]
+  {
+    use std::os::unix::ffi::OsStringExt;
+    let _ = name;
+    Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
+  }
+  #[cfg(not(unix))]
+  {
+    std::str::from_utf8(bytes)
+      .map(PathBuf::from)
+      .map_err(|_| arg_error(format!("{name} is not valid UTF-8")))
+  }
+}
+
+/// Required path argument.
+unsafe fn path_arg(p: *const c_char, name: &str) -> Result<PathBuf> {
+  if p.is_null() {
+    return Err(arg_error(format!("{name} must not be NULL")));
+  }
+  // SAFETY: caller guarantees a NUL terminated string.
+  let bytes = unsafe { CStr::from_ptr(p) }.to_bytes();
+  if bytes.is_empty() {
+    return Err(arg_error(format!("{name} must not be empty")));
+  }
+  bytes_to_path(bytes, name)
+}
+
+/// Optional path argument (NULL or empty = none).
+unsafe fn path_opt(p: *const c_char) -> Option<PathBuf> {
+  if p.is_null() {
+    return None;
+  }
+  // SAFETY: caller guarantees a NUL terminated string.
+  let bytes = unsafe { CStr::from_ptr(p) }.to_bytes();
+  if bytes.is_empty() { None } else { bytes_to_path(bytes, "path").ok() }
+}
+
+/// Optional text argument (NULL, empty or non-UTF-8 = none).
 unsafe fn cstr_opt(p: *const c_char) -> Option<String> {
   if p.is_null() {
     None
@@ -144,7 +185,7 @@ unsafe fn set_error(error_out: *mut *mut c_char, err: &Error) {
 }
 
 fn code_for(err: &Error) -> i32 {
-  if err.message().ends_with("must not be NULL") || err.message().ends_with("is not valid UTF-8") {
+  if err.message().starts_with(ARG_ERROR_PREFIX) {
     DNGLAB_INVALID_ARGUMENT
   } else {
     DNGLAB_ERROR
@@ -171,8 +212,10 @@ unsafe fn finish<T>(result: Result<T>, error_out: *mut *mut c_char, on_ok: impl 
 // ---------------------------------------------------------------------------
 
 /// Initialise logging. On Android this routes `log` output to logcat (tag
-/// "dnglab"); elsewhere it is a no-op. `level`: 0 = off, 1 = error, 2 = warn,
-/// 3 = info, 4 = debug, 5 = trace. Safe to call multiple times.
+/// "dnglab"); elsewhere it only sets the maximum level. `level`: 0 = off,
+/// 1 = error, 2 = warn, 3 = info, 4 = debug, 5 = trace. Safe to call multiple
+/// times; on Android only the first call's level takes effect because the
+/// logger can be installed once per process.
 #[unsafe(no_mangle)]
 pub extern "C" fn dnglab_init_logging(level: i32) {
   let filter = match level {
@@ -208,6 +251,9 @@ pub extern "C" fn dnglab_supported_extensions() -> *mut c_char {
 }
 
 /// Non-zero when `ext` (with or without leading dot, any case) is decodable.
+///
+/// # Safety
+/// `ext` must be NULL or a valid NUL terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dnglab_is_supported_extension(ext: *const c_char) -> i32 {
   // SAFETY: documented contract.
@@ -218,6 +264,10 @@ pub unsafe extern "C" fn dnglab_is_supported_extension(ext: *const c_char) -> i3
 }
 
 /// Release a string returned by this library. NULL is ignored.
+///
+/// # Safety
+/// `s` must be NULL or a pointer previously returned by this library and not
+/// yet freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dnglab_string_free(s: *mut c_char) {
   if !s.is_null() {
@@ -227,6 +277,10 @@ pub unsafe extern "C" fn dnglab_string_free(s: *mut c_char) {
 }
 
 /// Convert `input` RAW into a DNG at `output`. `options` may be NULL for defaults.
+///
+/// # Safety
+/// Pointer arguments must be NULL or valid NUL terminated strings / structs
+/// for the duration of the call; `error_out` must be NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dnglab_convert_to_dng(
   input: *const c_char,
@@ -236,8 +290,8 @@ pub unsafe extern "C" fn dnglab_convert_to_dng(
 ) -> i32 {
   let result = (|| -> Result<()> {
     // SAFETY: documented contract.
-    let input = unsafe { cstr_arg(input, "input") }?;
-    let output = unsafe { cstr_arg(output, "output") }?;
+    let input = unsafe { path_arg(input, "input") }?;
+    let output = unsafe { path_arg(output, "output") }?;
     let mut opts = DngOptions::default();
     if !options.is_null() {
       // SAFETY: non-null, caller provided struct.
@@ -248,13 +302,13 @@ pub unsafe extern "C" fn dnglab_convert_to_dng(
       opts.lossless = o.lossless != 0;
       opts.index = o.index as usize;
       opts.artist = unsafe { cstr_opt(o.artist) };
-      opts.dcp_dir = unsafe { cstr_opt(o.dcp_dir) }.map(PathBuf::from);
-      opts.dcp_file = unsafe { cstr_opt(o.dcp_file) }.map(PathBuf::from);
+      opts.dcp_dir = unsafe { path_opt(o.dcp_dir) };
+      opts.dcp_file = unsafe { path_opt(o.dcp_file) };
       if let Some(sw) = unsafe { cstr_opt(o.software) } {
         opts.software = sw;
       }
     }
-    api::convert_to_dng(Path::new(&input), Path::new(&output), &opts)
+    api::convert_to_dng(&input, &output, &opts)
   })();
   // SAFETY: forwarded out-pointer.
   unsafe { finish(result, error_out, |_| {}) }
@@ -262,6 +316,10 @@ pub unsafe extern "C" fn dnglab_convert_to_dng(
 
 /// Export `input` RAW as JPEG at `output`. `options` may be NULL for defaults,
 /// `result_out` may be NULL.
+///
+/// # Safety
+/// Pointer arguments must be NULL or valid NUL terminated strings / structs
+/// for the duration of the call; out-pointers must be NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dnglab_convert_to_jpeg(
   input: *const c_char,
@@ -272,8 +330,8 @@ pub unsafe extern "C" fn dnglab_convert_to_jpeg(
 ) -> i32 {
   let result = (|| -> Result<api::JpegOutcome> {
     // SAFETY: documented contract.
-    let input = unsafe { cstr_arg(input, "input") }?;
-    let output = unsafe { cstr_arg(output, "output") }?;
+    let input = unsafe { path_arg(input, "input") }?;
+    let output = unsafe { path_arg(output, "output") }?;
     let mut opts = JpegOptions::default();
     if !options.is_null() {
       // SAFETY: non-null, caller provided struct.
@@ -292,7 +350,7 @@ pub unsafe extern "C" fn dnglab_convert_to_jpeg(
         opts.software = sw;
       }
     }
-    api::convert_to_jpeg(Path::new(&input), Path::new(&output), &opts)
+    api::convert_to_jpeg(&input, &output, &opts)
   })();
   // SAFETY: forwarded out-pointers.
   unsafe {
@@ -312,6 +370,10 @@ pub unsafe extern "C" fn dnglab_convert_to_jpeg(
 
 /// Write a JPEG preview of `input` to `output`, longest edge <= `max_dimension`
 /// (0 = unlimited). `result_out` may be NULL.
+///
+/// # Safety
+/// Pointer arguments must be NULL or valid NUL terminated strings for the
+/// duration of the call; out-pointers must be NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dnglab_extract_preview(
   input: *const c_char,
@@ -322,9 +384,9 @@ pub unsafe extern "C" fn dnglab_extract_preview(
 ) -> i32 {
   let result = (|| -> Result<api::PreviewOutcome> {
     // SAFETY: documented contract.
-    let input = unsafe { cstr_arg(input, "input") }?;
-    let output = unsafe { cstr_arg(output, "output") }?;
-    api::extract_preview(Path::new(&input), Path::new(&output), max_dimension)
+    let input = unsafe { path_arg(input, "input") }?;
+    let output = unsafe { path_arg(output, "output") }?;
+    api::extract_preview(&input, &output, max_dimension)
   })();
   // SAFETY: forwarded out-pointers.
   unsafe {
@@ -343,12 +405,15 @@ pub unsafe extern "C" fn dnglab_extract_preview(
 
 /// Metadata of `input` as a JSON document (see `metadata.rs` for the schema).
 /// Returns NULL on failure with `error_out` set. Free with `dnglab_string_free`.
+///
+/// # Safety
+/// `input` must be a valid NUL terminated string; `error_out` NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dnglab_metadata_json(input: *const c_char, error_out: *mut *mut c_char) -> *mut c_char {
   let result = (|| -> Result<String> {
     // SAFETY: documented contract.
-    let input = unsafe { cstr_arg(input, "input") }?;
-    metadata::metadata_json(Path::new(&input))
+    let input = unsafe { path_arg(input, "input") }?;
+    metadata::metadata_json(&input)
   })();
   match result {
     Ok(json) => into_c_string(json),
@@ -389,6 +454,20 @@ mod tests {
     let json = unsafe { dnglab_metadata_json(input.as_ptr(), &mut err) };
     assert!(json.is_null());
     assert!(!err.is_null());
+    unsafe { dnglab_string_free(err) };
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn non_utf8_paths_are_accepted_as_bytes() {
+    // Not valid UTF-8, but a legal Unix path: must be treated as "file not
+    // found", not "invalid argument".
+    let input = CString::new(b"/nonexistent/\xff\xfe.nef".to_vec()).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let json = unsafe { dnglab_metadata_json(input.as_ptr(), &mut err) };
+    assert!(json.is_null());
+    let msg = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+    assert!(msg.contains("File not found"), "{msg}");
     unsafe { dnglab_string_free(err) };
   }
 

@@ -18,7 +18,7 @@ impl CnopBox {
 impl<R: Read + Seek> ReadBox<&mut R> for CnopBox {
   fn read_box(reader: &mut R, header: BoxHeader) -> Result<Self> {
     let current = reader.stream_position()?;
-    let data_len = header.end_offset() - current;
+    let data_len = header.end_offset().saturating_sub(current);
     let mut data = vec![0; data_len as usize];
     reader.read_exact(&mut data)?;
 

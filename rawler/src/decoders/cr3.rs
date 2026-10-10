@@ -659,7 +659,7 @@ impl Ctmd {
         reserved4: data.get_u8(),
         reserved5: data.get_i8(),
         reserved6: data.get_i8(),
-        payload: data.get_bytes(size as usize - 12),
+        payload: data.get_bytes((size as usize).saturating_sub(12)),
         blocks: HashMap::new(),
       };
       debug!(

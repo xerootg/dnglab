@@ -137,7 +137,10 @@ impl Rect {
   }
 
   pub fn new_with_borders(dim: Dim2, borders: &[usize; 4]) -> Self {
-    Self::new_with_points(Point::new(borders[0], borders[1]), Point::new(dim.w - borders[2], dim.h - borders[3]))
+    Self::new_with_points(
+      Point::new(borders[0], borders[1]),
+      Point::new(dim.w.saturating_sub(borders[2]), dim.h.saturating_sub(borders[3])),
+    )
   }
 
   /// DNG used top-left-bottom-right for all rectangles
@@ -161,12 +164,22 @@ impl Rect {
 
   /// Return as offsets from each side (LTRB)
   pub fn as_ltrb_offsets(&self, width: usize, height: usize) -> [usize; 4] {
-    [self.p.x, self.p.y, width - (self.p.x + self.d.w), height - (self.p.y + self.d.h)]
+    [
+      self.p.x,
+      self.p.y,
+      width.saturating_sub(self.p.x.saturating_add(self.d.w)),
+      height.saturating_sub(self.p.y.saturating_add(self.d.h)),
+    ]
   }
 
   /// Return as offsets from each side (TLBR)
   pub fn as_tlbr_offsets(&self, width: usize, height: usize) -> [usize; 4] {
-    [self.p.y, self.p.x, height - (self.p.y + self.d.h), width - (self.p.x + self.d.w)]
+    [
+      self.p.y,
+      self.p.x,
+      height.saturating_sub(self.p.y.saturating_add(self.d.h)),
+      width.saturating_sub(self.p.x.saturating_add(self.d.w)),
+    ]
   }
 
   // Read Crop params from IFD

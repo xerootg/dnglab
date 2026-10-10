@@ -22,6 +22,12 @@ use std::{
 
 const MAX_IFD_ENTRIES: usize = 4096;
 
+/// Upper bound for IFDs in a `next_ifd` chain when the caller gives no limit.
+pub(crate) const MAX_IFD_CHAIN: usize = 64;
+
+/// Upper bound for sub-IFD offsets processed per SubIFD-style tag.
+const MAX_SUB_IFDS_PER_TAG: usize = 64;
+
 #[derive(Debug)]
 pub enum OffsetMode {
   Absolute,
@@ -83,8 +89,15 @@ impl IFD {
     }
     next_ifd = root.next_ifd;
 
+    let max_chain = if max_chain == 0 { MAX_IFD_CHAIN } else { max_chain };
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(root.offset);
     while next_ifd != 0 {
       next_ifd = apply_corr(next_ifd, corr);
+      if !visited.insert(next_ifd) {
+        log::warn!("TIFF: IFD chain loops back to offset {}, stopping", next_ifd);
+        break;
+      }
       let ifd = IFD::new(reader, next_ifd, base, corr, endian, &multi_sub_tags)?;
       if ifd.entries.is_empty() {
         return Err(TiffError::General("TIFF is invalid, IFD must contain at least one entry".to_string()));
@@ -92,7 +105,7 @@ impl IFD {
       next_ifd = ifd.next_ifd;
       root.chain.push(ifd);
 
-      if root.chain.len() > max_chain && max_chain > 0 {
+      if root.chain.len() >= max_chain {
         break;
       }
     }
@@ -201,7 +214,15 @@ impl IFD {
     let reader = reader.into_inner();
     for subs in sub_ifd_offsets {
       let mut ifds = Vec::new();
-      for offset in subs.1 {
+      if subs.1.len() > MAX_SUB_IFDS_PER_TAG {
+        log::warn!(
+          "TIFF: tag 0x{:X} references {} sub-IFDs, only the first {} are read",
+          subs.0,
+          subs.1.len(),
+          MAX_SUB_IFDS_PER_TAG
+        );
+      }
+      for offset in subs.1.into_iter().take(MAX_SUB_IFDS_PER_TAG) {
         match Self::new(reader, apply_corr(offset, corr), base, corr, endian, &[]) {
           Ok(ifd) => ifds.push(ifd),
           Err(err) => {

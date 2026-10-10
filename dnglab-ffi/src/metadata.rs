@@ -8,13 +8,14 @@
 use std::path::Path;
 
 use chrono::{FixedOffset, NaiveDateTime, TimeZone};
+
 use rawler::decoders::RawMetadata;
 use rawler::formats::tiff::{Rational, SRational};
 use rawler::imgop::sensor::SensorType;
 use rawler::rawimage::RawPhotometricInterpretation;
 use serde_json::{Map, Value, json};
 
-use crate::api::{Opened, default_crop_dims, guard, is_full_resolution};
+use crate::api::{Opened, default_crop_dims, effective_orientation, guard, is_full_resolution};
 use crate::error::Result;
 
 fn rat(r: &Rational) -> f64 {
@@ -58,8 +59,9 @@ pub fn format_shutter(seconds: f64) -> String {
 }
 
 /// Convert an EXIF date ("YYYY:MM:DD HH:MM:SS") to display form and unix seconds.
-/// `offset` is an EXIF OffsetTime string like "+02:00"; without it the local
-/// time zone of this device is assumed.
+/// `offset` is an EXIF OffsetTime string like "+02:00". Without it the camera's
+/// zone is unknown, so no unix timestamp is produced (guessing the device's
+/// current zone is wrong whenever the photo was taken elsewhere).
 pub fn exif_date(date: &str, offset: Option<&str>) -> (String, Option<i64>) {
   let date = date.trim();
   let Ok(naive) = NaiveDateTime::parse_from_str(date, "%Y:%m:%d %H:%M:%S") else {
@@ -69,8 +71,7 @@ pub fn exif_date(date: &str, offset: Option<&str>) -> (String, Option<i64>) {
   let ts = offset
     .and_then(|o| o.trim().parse::<FixedOffset>().ok())
     .and_then(|tz| tz.from_local_datetime(&naive).earliest())
-    .map(|dt| dt.timestamp())
-    .or_else(|| chrono::Local.from_local_datetime(&naive).earliest().map(|dt| dt.timestamp()));
+    .map(|dt| dt.timestamp());
   (display, ts)
 }
 
@@ -179,7 +180,7 @@ fn build_document(opened: &Opened, md: &RawMetadata) -> Value {
     }
   }
 
-  // Orientation from EXIF (may be refined by the raw image below)
+  // Orientation: EXIF, else what the decoder put on the frame (DNG/QTK), else 1.
   let mut orientation = exif.orientation.filter(|o| (1..=8).contains(o)).unwrap_or(1);
 
   // Dimensions and sensor layout via a structure-only decode.
@@ -190,10 +191,7 @@ fn build_document(opened: &Opened, md: &RawMetadata) -> Value {
       m.insert("height".into(), json!(h));
       m.insert("raw_width".into(), json!(raw.width));
       m.insert("raw_height".into(), json!(raw.height));
-      let o = raw.orientation.to_u16();
-      if (1..=8).contains(&o) {
-        orientation = o;
-      }
+      orientation = effective_orientation(md, &raw);
       let (colors, pattern) = match &raw.photometric {
         RawPhotometricInterpretation::Cfa(cfa) => {
           let pattern = match cfa.sensor {
@@ -321,6 +319,10 @@ mod tests {
     assert_eq!(ts, Some(1717245296 - 7200));
     let (d, ts) = exif_date("garbage", None);
     assert_eq!(d, "garbage");
+    assert_eq!(ts, None);
+    // No offset: display only, no guessed timestamp
+    let (d, ts) = exif_date("2024:06:01 12:34:56", None);
+    assert_eq!(d, "2024-06-01 12:34:56");
     assert_eq!(ts, None);
   }
 }

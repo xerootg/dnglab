@@ -86,13 +86,20 @@ impl<'a> Decompressor<'a, f32> for DeflateDecompressor {
   /// # Panics
   /// Panics if `bps` is not 16, 24, or 32.
   fn decompress(&self, src: &[u8], skip_rows: usize, lines: impl LineIteratorMut<'a, f32>, line_width: usize) -> std::result::Result<(), String> {
-    let mut decoder = Decoder::new(src).map_err(|err| err.to_string())?;
-    let mut decoded_data = Vec::new();
-    decoder.read_to_end(&mut decoded_data).map_err(|err| err.to_string())?;
-
     let bytesps = self.bps as usize / 8;
     assert!(bytesps >= 2 && bytesps <= 4);
-    if decoded_data.len() != bytesps * line_width * lines.len() {
+    let expected = bytesps * line_width * lines.len();
+
+    let decoder = Decoder::new(src).map_err(|err| err.to_string())?;
+    let mut decoded_data = Vec::new();
+    // Never inflate more than one byte past what the tile can hold; a
+    // compression bomb would otherwise expand without bound.
+    decoder
+      .take(expected as u64 + 1)
+      .read_to_end(&mut decoded_data)
+      .map_err(|err| err.to_string())?;
+
+    if decoded_data.len() != expected {
       return Err(format!("DeflateDecompressor: buffer length mismatch"));
     }
 

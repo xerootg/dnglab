@@ -89,9 +89,9 @@ pub fn splice_exif_app1(jpeg: &[u8], app1_payload: &[u8]) -> Result<Vec<u8>> {
     return Err(Error::new("EXIF block too large for a single APP1 segment"));
   }
 
-  // Walk the header segments (APPn / COM) until the first non-header marker.
-  // Collect everything except EXIF APP1 segments, remembering where a leading
-  // APP0 ends so the new EXIF block can go right behind it.
+  // Walk every header segment up to the first scan (SOS). Collect everything
+  // except EXIF APP1 segments, remembering where a leading APP0 ends so the new
+  // EXIF block can go right behind it.
   let mut out = Vec::with_capacity(jpeg.len() + app1_payload.len() + 4);
   out.extend_from_slice(&jpeg[..2]);
   let mut pos = 2usize;
@@ -100,8 +100,15 @@ pub fn splice_exif_app1(jpeg: &[u8], app1_payload: &[u8]) -> Result<Vec<u8>> {
 
   while pos + 4 <= jpeg.len() && jpeg[pos] == 0xFF {
     let marker = jpeg[pos + 1];
-    // Only APPn (E0..EF) and COM (FE) segments are header segments we can skip over.
-    if !((0xE0..=0xEF).contains(&marker) || marker == 0xFE) {
+    if marker == 0xFF {
+      // Fill byte: keep it and move on.
+      out.push(0xFF);
+      pos += 1;
+      continue;
+    }
+    // Stop at SOS (scan data follows, no more length-prefixed headers), at
+    // stand-alone markers and at anything that is not a length-prefixed segment.
+    if marker == 0xDA || marker == 0xD9 || (0xD0..=0xD8).contains(&marker) || marker == 0x01 || marker == 0x00 {
       break;
     }
     let seg_len = u16::from_be_bytes([jpeg[pos + 2], jpeg[pos + 3]]) as usize;
@@ -141,8 +148,13 @@ pub fn jpeg_dimensions(data: &[u8]) -> (u32, u32) {
       continue;
     }
     let marker = data[i + 1];
+    if marker == 0xFF {
+      // Fill byte before a marker: the next byte may be the real marker.
+      i += 1;
+      continue;
+    }
     i += 2;
-    if marker == 0xFF || marker == 0x00 || marker == 0xD8 || (0xD0..=0xD7).contains(&marker) || marker == 0xD9 {
+    if marker == 0x00 || marker == 0xD8 || (0xD0..=0xD7).contains(&marker) || marker == 0xD9 {
       continue;
     }
     if i + 2 > data.len() {
@@ -221,12 +233,19 @@ fn orientation_from_tiff(tiff: &[u8]) -> Option<u16> {
       u32::from_be_bytes([b[0], b[1], b[2], b[3]])
     })
   };
-  let ifd0 = rd32(4)? as usize;
+  if rd16(2)? != 42 {
+    return None;
+  }
+  let ifd0 = usize::try_from(rd32(4)?).ok()?;
   let count = rd16(ifd0)? as usize;
   for i in 0..count {
-    let e = ifd0 + 2 + i * 12;
+    let e = ifd0.checked_add(2)?.checked_add(i.checked_mul(12)?)?;
     if rd16(e)? == 0x0112 {
-      return rd16(e + 8);
+      // Orientation must be one SHORT; anything else is not a usable value.
+      if rd16(e + 2)? != 3 || rd32(e + 4)? != 1 {
+        return None;
+      }
+      return rd16(e + 8).filter(|o| (1..=8).contains(o));
     }
   }
   None
@@ -278,6 +297,45 @@ mod tests {
       assert_eq!(jpeg_dimensions(&out), (32, 16));
       assert_eq!(jpeg_exif_orientation(&out), Some(6));
     }
+  }
+
+  #[test]
+  fn dimensions_skip_fill_bytes() {
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0xFF, 0xFF];
+    v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03]);
+    v.extend_from_slice(&[1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xFF, 0xD9]);
+    assert_eq!(jpeg_dimensions(&v), (32, 16));
+  }
+
+  #[test]
+  fn splice_strips_exif_after_dqt() {
+    // SOI, DQT, EXIF APP1 (non-standard position), SOF, EOI
+    let mut v = vec![0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x04, 0x00, 0x00];
+    let payload = b"Exif\0\0II*\0\x08\0\0\0\0\0";
+    v.extend_from_slice(&[0xFF, 0xE1]);
+    v.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    v.extend_from_slice(payload);
+    v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x20, 0x03]);
+    v.extend_from_slice(&[1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xFF, 0xD9]);
+    let out = splice_exif_app1(&v, b"Exif\0\0II*\0\x08\0\0\0\0\0").unwrap();
+    assert_eq!(out.windows(6).filter(|w| *w == b"Exif\0\0").count(), 1);
+    assert_eq!(&out[2..4], &[0xFF, 0xE1], "EXIF goes right after SOI when there is no APP0");
+    assert_eq!(jpeg_dimensions(&out), (32, 16));
+  }
+
+  #[test]
+  fn orientation_requires_short_count_one() {
+    // Orientation entry typed LONG -> rejected
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    let tiff = b"II*\0\x08\0\0\0\x01\0\x12\x01\x04\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+    jpeg.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+    jpeg.extend_from_slice(b"Exif\0\0");
+    jpeg.extend_from_slice(tiff);
+    jpeg.extend_from_slice(&[0xFF, 0xD9]);
+    assert_eq!(jpeg_exif_orientation(&jpeg), None);
+    // Truncated TIFF never panics
+    assert_eq!(orientation_from_tiff(b"II*\0\xff\xff\xff\xff"), None);
+    assert_eq!(orientation_from_tiff(b"II*\0\x08\0\0\0\xff\xff"), None);
   }
 
   #[test]

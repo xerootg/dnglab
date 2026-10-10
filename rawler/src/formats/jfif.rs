@@ -58,8 +58,9 @@ impl<R: Read + Seek> ReadSegment<&mut R> for App0 {
         let ydensity = reader.read_u16::<BigEndian>()?;
         let xthumbnail = reader.read_u8()?;
         let ythumbnail = reader.read_u8()?;
-        let thumbnail = if xthumbnail * ythumbnail > 0 {
-          let mut data = vec![0; (3 * xthumbnail * ythumbnail) as usize];
+        let thumbnail_pixels = xthumbnail as usize * ythumbnail as usize;
+        let thumbnail = if thumbnail_pixels > 0 {
+          let mut data = vec![0; 3 * thumbnail_pixels];
           reader.read_exact(&mut data)?;
           Some(data)
         } else {
@@ -174,7 +175,7 @@ impl<R: Read + Seek> ReadSegment<&mut R> for App1 {
     }
 
     const APP1_XMP_MARKER: &str = concat!("http://ns.adobe.com/xap/1.0/", '\0');
-    if len as usize >= APP1_XMP_MARKER.len() {
+    if len as usize >= APP1_XMP_MARKER.len() + 2 {
       let mut xmp_str = [0; APP1_XMP_MARKER.len()];
       reader.read_exact(&mut xmp_str)?;
       if xmp_str == APP1_XMP_MARKER.as_bytes() {
@@ -231,8 +232,10 @@ impl Jfif {
         0xFFE1 => match App1::read_segment(&mut reader, symbol) {
           Ok(app1) => Segment::APP1 { offset: pos, app1 },
           Err(err) => {
-            log::warn!("Failed to read APP1 (EXIF) segement, maybe corrupt: {:?}", err);
-            continue;
+            // The reader position is undefined after a failed segment parse;
+            // re-reading the same marker would loop forever. Keep what we have.
+            log::warn!("Failed to read APP1 (EXIF) segement, maybe corrupt, stopping segment scan: {:?}", err);
+            break;
           }
         },
         0xFFDA => Segment::SOS {
@@ -318,5 +321,30 @@ pub fn is_exif(file: &RawSource) -> bool {
       log::error!("is_exif(): {:?}", err);
       false
     }
+  }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+  use super::*;
+  use std::io::Cursor;
+
+  #[test]
+  fn truncated_app1_segment_stops_scan_instead_of_looping() {
+    // SOI, then an APP1 marker whose declared length runs past the end of the data.
+    let buf = [0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x40, b'E', b'x', b'i', b'f', 0, 0];
+    let jfif = Jfif::parse(Cursor::new(&buf[..])).expect("SOI was read, parse must succeed");
+    assert!(matches!(jfif.segments[0], Segment::SOI { .. }));
+    assert_eq!(jfif.segments.len(), 1);
+  }
+
+  #[test]
+  fn app0_thumbnail_dimension_does_not_overflow() {
+    // JFIF APP0 with a 255x255 thumbnail claim but no data: must error, not panic on u8 overflow.
+    let mut buf = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+    buf.extend_from_slice(b"JFIF\0");
+    buf.extend_from_slice(&[1, 1, 0, 0, 1, 0, 1, 255, 255]);
+    let result = Jfif::parse(Cursor::new(&buf[..]));
+    assert!(result.is_err());
   }
 }

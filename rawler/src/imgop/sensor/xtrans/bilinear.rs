@@ -69,6 +69,16 @@ impl Demosaic<f32, 3> for XTransBilinearDemosaic {
 /// Uses SIMD acceleration via `multiversion` when available (AVX2, SSE, NEON).
 #[multiversion(targets("x86_64+avx+avx2", "x86+sse", "aarch64+neon"))]
 fn interpolate_bilinear(input: &PixF32, cfa: &CFA, roi: Rect) -> Color2D<f32, 3> {
+  assert!(
+    roi.width() > 0
+      && roi.height() > 0
+      && roi.p.x.saturating_add(roi.width()) <= input.width
+      && roi.p.y.saturating_add(roi.height()) <= input.height,
+    "X-Trans demosaic ROI {:?} is outside of the {}x{} input",
+    roi,
+    input.width,
+    input.height
+  );
   let cfa_roi = cfa.shift(roi.p.x, roi.p.y);
   let mut output = RgbF32::new_with_default(roi.width(), roi.height(), f32::NAN);
   let width = output.width;

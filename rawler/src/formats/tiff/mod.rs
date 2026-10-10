@@ -14,6 +14,7 @@ pub mod writer;
 
 pub use entry::Entry;
 pub use ifd::IFD;
+pub(crate) use ifd::MAX_IFD_CHAIN;
 pub use reader::GenericTiffReader;
 pub use value::{IntoTiffValue, Rational, SRational, TiffAscii, Value};
 pub use writer::{DirectoryWriter, TiffWriter};

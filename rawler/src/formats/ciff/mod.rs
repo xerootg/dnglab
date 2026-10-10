@@ -1,6 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{bits::*, rawsource::RawSource};
+
+/// Upper bound for directory entries in one CIFF heap; real files have a few dozen.
+const MAX_CIFF_ENTRIES: usize = 4096;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CiffTag {
@@ -53,20 +56,42 @@ impl CiffIFD {
   }
 
   pub fn new(buf: &[u8], start: usize, end: usize, depth: u32) -> Result<CiffIFD, String> {
+    let mut visited = HashSet::new();
+    // Entries copy their data; bound the total so that many entries (or
+    // sub-IFDs) pointing at the same large region cannot multiply memory use.
+    let mut budget = buf.len().saturating_mul(2).max(1 << 20);
+    Self::new_inner(buf, start, end, depth, &mut visited, &mut budget)
+  }
+
+  fn new_inner(buf: &[u8], start: usize, end: usize, depth: u32, visited: &mut HashSet<(usize, usize)>, budget: &mut usize) -> Result<CiffIFD, String> {
     let mut entries = HashMap::new();
     let mut subifds = Vec::new();
 
+    if end > buf.len() || end < start.saturating_add(4) {
+      return Err(format!("CIFF: heap range {}..{} is outside the file ({} bytes)", start, end, buf.len()));
+    }
+    if !visited.insert((start, end)) {
+      return Err(format!("CIFF: heap {}..{} references itself", start, end));
+    }
+
     let valuedata_size = LEu32(buf, end - 4) as usize;
-    let dircount = LEu16(buf, start + valuedata_size) as usize;
+    let dir_start = start
+      .checked_add(valuedata_size)
+      .filter(|pos| pos + 2 <= end)
+      .ok_or_else(|| format!("CIFF: value data size {} does not fit into heap {}..{}", valuedata_size, start, end))?;
+    let dircount = LEu16(buf, dir_start) as usize;
+    if dircount > MAX_CIFF_ENTRIES || dir_start + 2 + dircount * 10 > end {
+      return Err(format!("CIFF: directory with {} entries does not fit into heap {}..{}", dircount, start, end));
+    }
 
     for i in 0..dircount {
-      let entry_offset: usize = start + valuedata_size + 2 + i * 10;
-      let e = CiffEntry::new(buf, start, entry_offset)?;
+      let entry_offset: usize = dir_start + 2 + i * 10;
+      let e = CiffEntry::new(buf, start, entry_offset, budget)?;
       if e.typ == 0x2800 || e.typ == 0x3000 {
         // SubIFDs
         if depth < 10 {
           // Avoid infinite looping IFDs
-          let ifd = CiffIFD::new(buf, e.data_offset, e.data_offset + e.bytesize, depth + 1);
+          let ifd = CiffIFD::new_inner(buf, e.data_offset, e.data_offset + e.bytesize, depth + 1, visited, budget);
           match ifd {
             Ok(val) => {
               subifds.push(val);
@@ -99,7 +124,7 @@ impl CiffIFD {
 }
 
 impl CiffEntry {
-  pub fn new(buf: &[u8], value_data: usize, offset: usize) -> Result<CiffEntry, String> {
+  pub fn new(buf: &[u8], value_data: usize, offset: usize, budget: &mut usize) -> Result<CiffEntry, String> {
     let p = LEu16(buf, offset);
     let tag = p & 0x3fff;
     let datalocation = (p & 0xc000) as usize;
@@ -107,12 +132,24 @@ impl CiffEntry {
 
     let (bytesize, data_offset) = match datalocation {
       // Data is offset in value_data
-      0x0000 => (LEu32(buf, offset + 2) as usize, LEu32(buf, offset + 6) as usize + value_data),
+      0x0000 => (
+        LEu32(buf, offset + 2) as usize,
+        (LEu32(buf, offset + 6) as usize)
+          .checked_add(value_data)
+          .ok_or_else(|| "CIFF: entry data offset overflows".to_string())?,
+      ),
       // Data is stored directly in entry
       0x4000 => (8, offset + 2),
       val => return Err(format!("CIFF: Don't know about data location {:x}", val)),
     };
-    let data = &buf[data_offset..data_offset + bytesize];
+    let data_end = data_offset
+      .checked_add(bytesize)
+      .filter(|end| *end <= buf.len())
+      .ok_or_else(|| format!("CIFF: entry 0x{:x} data {}+{} is outside the file ({} bytes)", tag, data_offset, bytesize, buf.len()))?;
+    *budget = budget
+      .checked_sub(bytesize)
+      .ok_or_else(|| format!("CIFF: entries reference more data than the file can plausibly hold (entry 0x{:x})", tag))?;
+    let data = &buf[data_offset..data_end];
     let count = bytesize >> CiffEntry::element_shift(typ);
 
     Ok(CiffEntry {
@@ -159,5 +196,35 @@ impl CiffEntry {
   }
   pub fn get_force_u16(&self, idx: usize) -> u16 {
     LEu16(&self.data, idx * 2)
+  }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+  use super::*;
+
+  #[test]
+  fn ciff_heap_with_bogus_value_size_is_an_error() {
+    // value data size (last 4 bytes) points far outside the buffer.
+    let buf = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x7F];
+    assert!(CiffIFD::new(&buf, 0, buf.len(), 1).is_err());
+  }
+
+  #[test]
+  fn ciff_heap_outside_buffer_is_an_error() {
+    let buf = [0u8; 16];
+    assert!(CiffIFD::new(&buf, 0, 64, 1).is_err());
+  }
+
+  #[test]
+  fn ciff_entry_pointing_outside_buffer_is_an_error() {
+    // Heap: value data = 0 bytes, directory with 1 entry (10 bytes), then value size (4 bytes).
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&1u16.to_le_bytes()); // dircount
+    buf.extend_from_slice(&0x1031u16.to_le_bytes()); // tag, location 0x0000 (in value data)
+    buf.extend_from_slice(&0x1000_0000u32.to_le_bytes()); // bytesize
+    buf.extend_from_slice(&0u32.to_le_bytes()); // offset
+    buf.extend_from_slice(&0u32.to_le_bytes()); // value data size
+    assert!(CiffIFD::new(&buf, 0, buf.len(), 1).is_err());
   }
 }

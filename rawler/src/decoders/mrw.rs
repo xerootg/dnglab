@@ -182,7 +182,9 @@ impl<'a> MrwDecoder<'a> {
         }
         _ => {}
       }
-      currpos += (len + 8) as usize;
+      // usize arithmetic: a 32 bit `len + 8` wraps to a tiny step and the
+      // loop never terminates.
+      currpos += len as usize + 8;
     }
 
     let tiff_data = file.subview_until_eof(tiffpos as u64)?;

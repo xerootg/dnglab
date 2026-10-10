@@ -281,13 +281,18 @@ impl<'a> DngDecoder<'a> {
 
     let active_area = self.get_active_area(raw, width, height);
     let crop_area = if let Some(crops) = self.get_crop(raw) {
+      let mut full = crops;
       if let Some(active_area) = &active_area {
-        let mut full = crops;
-        full.p.x += active_area[0]; // left
-        full.p.y += active_area[1]; // Top
+        full.p.x = full.p.x.saturating_add(active_area[0]); // left
+        full.p.y = full.p.y.saturating_add(active_area[1]); // Top
+      }
+      let fits = full.p.x.checked_add(full.d.w).map(|r| r <= width).unwrap_or(false)
+        && full.p.y.checked_add(full.d.h).map(|b| b <= height).unwrap_or(false);
+      if fits {
         Some(full.as_ltrb_offsets(width, height))
       } else {
-        Some(crops.as_ltrb_offsets(width, height))
+        log::warn!("DNG: ignoring DefaultCrop {:?} outside of {}x{} image", full, width, height);
+        None
       }
     } else {
       None
@@ -398,7 +403,12 @@ impl<'a> DngDecoder<'a> {
 
   fn get_active_area_borders(&self, raw: &IFD) -> Option<[usize; 4]> {
     if let Some(crops) = raw.get_entry(DngTag::ActiveArea) {
+      // top, left, bottom, right
       let rect = [crops.force_usize(0), crops.force_usize(1), crops.force_usize(2), crops.force_usize(3)];
+      if crops.count() < 4 || rect[0] > rect[2] || rect[1] > rect[3] {
+        log::warn!("DNG: ignoring malformed ActiveArea {:?}", rect);
+        return None;
+      }
       Some(rect)
     } else {
       // Ignore missing crops, at least some pentax DNGs don't have it
@@ -408,6 +418,11 @@ impl<'a> DngDecoder<'a> {
 
   fn get_active_area(&self, raw: &IFD, width: usize, height: usize) -> Option<[usize; 4]> {
     if let Some(rect) = self.get_active_area_borders(raw) {
+      // rect is top, left, bottom, right
+      if rect[2] > height || rect[3] > width {
+        log::warn!("DNG: ignoring ActiveArea {:?} outside of {}x{} image", rect, width, height);
+        return None;
+      }
       Some(Rect::new_with_dng(&rect).as_ltrb_offsets(width, height))
     } else {
       None
